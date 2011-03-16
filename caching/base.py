@@ -41,6 +41,7 @@ class CachingManager(models.Manager):
     def contribute_to_class(self, cls, name):
         signals.post_save.connect(self.post_save, sender=cls)
         signals.post_delete.connect(self.post_delete, sender=cls)
+        signals.m2m_changed.connect(self.m2m_changed)
         return super(CachingManager, self).contribute_to_class(cls, name)
 
     def post_save(self, instance, **kwargs):
@@ -48,7 +49,12 @@ class CachingManager(models.Manager):
 
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
-
+    
+    def m2m_changed(self, instance, action, *args, **kwargs):
+        if action[:4] != "post":
+            return
+        self.invalidate(instance)
+    
     def invalidate(self, *objects):
         """Invalidate all the flush lists associated with ``objects``."""
         self.invalidate_keys(k for o in objects for k in o._cache_keys())
