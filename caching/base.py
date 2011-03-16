@@ -56,8 +56,13 @@ class CachingManager(models.Manager):
         self.invalidate(instance)
     
     def invalidate(self, *objects):
+        keys = []
+        for o in objects:
+            if hasattr(o, '_cache_keys'):
+                keys += list(o._cache_keys())
         """Invalidate all the flush lists associated with ``objects``."""
-        self.invalidate_keys(k for o in objects for k in o._cache_keys())
+        if len(keys) > 0:
+            self.invalidate_keys(keys)
 
     def invalidate_keys(self, keys):
         """Invalidate all the flush lists named by the list of ``keys``."""
