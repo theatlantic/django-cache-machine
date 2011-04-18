@@ -44,8 +44,11 @@ class CachingManager(models.Manager):
         signals.m2m_changed.connect(self.m2m_changed)
         return super(CachingManager, self).contribute_to_class(cls, name)
 
-    def post_save(self, instance, **kwargs):
-        self.invalidate(instance)
+    def post_save(self, instance, created, **kwargs):
+        if created:
+            cache.clear()
+        else:
+            self.invalidate(instance)
 
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
