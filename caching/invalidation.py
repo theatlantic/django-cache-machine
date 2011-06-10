@@ -142,6 +142,9 @@ class Invalidator(object):
         """Remove the given keys from the database."""
         cache.delete_many(keys)
 
+    def clear(self):
+        """Clears all"""
+        cache.clear()
 
 class RedisInvalidator(Invalidator):
 
@@ -167,6 +170,11 @@ class RedisInvalidator(Invalidator):
     @safe_redis(None)
     def clear_flush_lists(self, keys):
         redis.delete(*map(self.safe_key, keys))
+
+    @safe_redis(None)
+    def clear(self):
+        """Clears all"""
+        redis.flushall()
 
 
 class NullInvalidator(Invalidator):
