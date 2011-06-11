@@ -8,6 +8,9 @@ from django.db.models import signals
 from django.db.models.sql import query
 from django.utils import encoding
 
+from datetime import timedelta
+second_delta = timedelta(seconds=1)
+
 from .invalidation import invalidator, flush_key, make_key, byid
 
 
@@ -43,9 +46,21 @@ class CachingManager(models.Manager):
         signals.post_delete.connect(self.post_delete, sender=cls)
         return super(CachingManager, self).contribute_to_class(cls, name)
 
-    def post_save(self, instance, **kwargs):
+    def post_save(self, instance, created, **kwargs):
+        # These steps help add flush keys (or clear the cache)
+        # for newly created objects
         self.invalidate(instance)
-
+        if created:
+            if hasattr(instance, 'date_created'):
+                try:
+                    instance.date_created += second_delta
+                    instance.save()
+                    self.invalidate(instance)
+                except TypeError:
+                    invalidator.clear()
+            else:
+                invalidator.clear()
+        
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
 

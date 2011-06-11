@@ -174,7 +174,7 @@ class RedisInvalidator(Invalidator):
     @safe_redis(None)
     def clear(self):
         """Clears all"""
-        redis.flushall()
+        redis.flushdb()
 
 
 class NullInvalidator(Invalidator):
