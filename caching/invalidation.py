@@ -3,6 +3,7 @@ import functools
 import hashlib
 import logging
 import socket
+import sys
 
 from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
@@ -20,6 +21,14 @@ FLUSH = CACHE_PREFIX + ':flush:'
 
 log = logging.getLogger('caching.invalidation')
 
+try:
+    from sentry.client.handlers import SentryHandler
+
+    sentry_logger = logging.getLogger('root')
+    if SentryHandler not in map(lambda x: x.__class__, sentry_logger.handlers):
+        sentry_logger.addHandler(SentryHandler())
+except ImportError:
+    sentry_logger = None
 
 def make_key(k, with_locale=True):
     """Generate the full key for ``k``, with a prefix."""
@@ -55,6 +64,11 @@ def safe_redis(return_type):
                 return f(*args, **kw)
             except (socket.error, redislib.RedisError), e:
                 log.error('redis error: %s' % e)
+                if sentry_logger is not None:
+                    sentry_logger.warning(
+                        'RedisError: %s' % e,
+                        exc_info=sys.exc_info()
+                    )
                 # log.error('%r\n%r : %r' % (f.__name__, args[1:], kw))
                 if hasattr(return_type, '__call__'):
                     return return_type()
