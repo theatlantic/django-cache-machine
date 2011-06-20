@@ -69,8 +69,8 @@ class CachingManager(models.Manager):
             if hasattr(o, '_cache_keys'):
                 keys += list(o._cache_keys())
         """Invalidate all the flush lists associated with ``objects``."""
-        keys = [k for o in objects for k in o._cache_keys()]
-        invalidator.invalidate_keys(keys)
+        if len(keys) > 0:
+            invalidator.invalidate_keys(keys)
 
     def raw(self, raw_query, params=None, *args, **kwargs):
         return CachingRawQuerySet(raw_query, self.model, params=params,
