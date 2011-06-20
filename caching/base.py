@@ -10,6 +10,8 @@ from django.utils import encoding
 
 from .invalidation import invalidator, flush_key, make_key, byid
 
+from datetime import timedelta
+second_delta = timedelta(seconds=1)
 
 class NullHandler(logging.Handler):
 
@@ -41,11 +43,18 @@ class CachingManager(models.Manager):
         return super(CachingManager, self).contribute_to_class(cls, name)
 
     def post_save(self, instance, created, **kwargs):
+        self.invalidate(instance)
         if created:
-            cache.clear()
-        else:
-            self.invalidate(instance)
-
+            if hasattr(instance, 'date_created'):
+                try:
+                    instance.date_created += second_delta
+                    instance.save()
+                    self.invalidate(instance)
+                except TypeError:
+                    invalidator.clear()
+            else:
+                invalidator.clear()
+        
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
     
