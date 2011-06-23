@@ -8,7 +8,6 @@ import sys
 from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.utils import encoding, translation
-from pprint import pprint
 try:
     import redis as redislib
 except ImportError:
@@ -93,13 +92,6 @@ class Invalidator(object):
             self.clear_flush_lists(flush_keys)
 
     def cache_objects(self, objects, query_key, query_flush):
-        pprint({
-            'cache_objects_args': {
-                'objects': objects,
-                'query_key': query_key,
-                'query_flush': query_flush
-            }
-        })
         # Add this query to the flush list of each object.  We include
         # query_flush so that other things can be cached against the queryset
         # and still participate in invalidation.
@@ -179,9 +171,6 @@ class RedisInvalidator(Invalidator):
     def add_to_flush_list(self, mapping):
         """Update flush lists with the {flush_key: [query_key,...]} map."""
         pipe = redis.pipeline(transaction=False)
-        pprint({
-            'add_to_flush_list_mapping': mapping.items()
-        })
         for key, list_ in mapping.items():
             for query_key in list_:
                 pipe.sadd(self.safe_key(key), query_key)
@@ -189,9 +178,6 @@ class RedisInvalidator(Invalidator):
 
     @safe_redis(set)
     def get_flush_lists(self, keys):
-        pprint({
-            'get_flush_lists_keys': keys
-        })
         return redis.sunion(map(self.safe_key, keys))
 
     @safe_redis(None)
