@@ -62,8 +62,7 @@ def safe_redis(return_type):
         def wrapper(*args, **kw):
             try:
                 return f(*args, **kw)
-            except (socket.error,), e:
-            #except (socket.error, redislib.RedisError), e:
+            except (socket.error, redislib.RedisError), e:
                 log.error('redis error: %s' % e)
                 if sentry_logger is not None:
                     sentry_logger.warning(
