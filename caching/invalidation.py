@@ -120,14 +120,18 @@ class Invalidator(object):
         lists found therein.  Returns ({objects to flush}, {flush keys found}).
         """
         new_keys = keys = set(map(flush_key, keys))
-        flush = set(keys)
+        flush = set(k for k in keys if not k.startswith(FLUSH))
 
         # Add other flush keys from the lists, which happens when a parent
         # object includes a foreign key.
         while 1:
             to_flush = self.get_flush_lists(new_keys)
-            flush.update(to_flush)
-            new_keys = set(k for k in to_flush if k.startswith(FLUSH))
+            new_keys = set([])
+            for k in to_flush:
+                if k.startswith(FLUSH):
+                    new_keys.add(k)
+                else:
+                    flush.add(k)
             diff = new_keys.difference(keys)
             if diff:
                 keys.update(new_keys)
