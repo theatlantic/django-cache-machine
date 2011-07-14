@@ -45,15 +45,7 @@ class CachingManager(models.Manager):
     def post_save(self, instance, created, **kwargs):
         self.invalidate(instance)
         if created:
-            if hasattr(instance, 'date_created'):
-                try:
-                    instance.date_created += second_delta
-                    instance.save()
-                    self.invalidate(instance)
-                except TypeError:
-                    invalidator.clear()
-            else:
-                invalidator.clear()
+            invalidator.clear()
         
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
