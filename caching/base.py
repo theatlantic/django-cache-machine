@@ -26,7 +26,7 @@ FOREVER = 0
 NO_CACHE = -1
 CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
 FETCH_BY_ID = getattr(settings, 'FETCH_BY_ID', False)
-
+CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
 
 class CachingManager(models.Manager):
 
@@ -101,7 +101,8 @@ class CacheMachine(object):
         # Try to fetch from the cache.
         cached = cache.get(query_key)
         if cached is not None:
-            log.debug('cache hit: %s' % self.query_string)
+            if CACHE_DEBUG:
+                log.debug('cache hit: %s' % self.query_string)
             for obj in cached:
                 obj.from_cache = True
                 yield obj
@@ -274,10 +275,11 @@ def cached(function, key_, duration=None):
     key = _function_cache_key(key_)
     val = cache.get(key)
     if val is None:
-        log.debug('cache miss for %s' % key)
+        if CACHE_DEBUG:
+            log.debug('cache miss for %s' % key)
         val = function()
         cache.set(key, val, duration)
-    else:
+    elif CACHE_DEBUG:
         log.debug('cache hit for %s' % key)
     return val
 
