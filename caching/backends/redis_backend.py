@@ -195,6 +195,10 @@ class CacheClass(BaseCache):
         elif hasattr(self._cache, 'connection_pool'):
             self._cache.connection_pool.disconnect()
 
+    @property
+    def redis(self):
+        return self._cache
+
 class RedisCache(CacheClass):
     """
     A subclass that is supposed to be used on Django >= 1.3.

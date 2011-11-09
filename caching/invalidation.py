@@ -8,6 +8,8 @@ import sys
 from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.utils import encoding, translation
+import caching.backends.redis_backend
+
 try:
     import redis as redislib
 except ImportError:
@@ -199,37 +201,10 @@ class NullInvalidator(Invalidator):
         return
 
 
-def get_redis_backend():
-    """Connect to redis from a string like CACHE_BACKEND."""
-    # From django-redis-cache.
-    _, server, params = parse_backend_uri(settings.REDIS_BACKEND)
-    db = params.pop('db', 1)
-    try:
-        db = int(db)
-    except (ValueError, TypeError):
-        db = 1
-    try:
-        socket_timeout = float(params.pop('socket_timeout'))
-    except (KeyError, ValueError):
-        socket_timeout = None
-    password = params.pop('password', None)
-    if ':' in server:
-        host, port = server.split(':')
-        try:
-            port = int(port)
-        except (ValueError, TypeError):
-            port = 6379
-    else:
-        host = 'localhost'
-        port = 6379
-    return redislib.Redis(host=host, port=port, db=db, password=password,
-                          socket_timeout=socket_timeout)
-
-
 if getattr(settings, 'CACHE_MACHINE_NO_INVALIDATION', False):
     invalidator = NullInvalidator()
-elif getattr(settings, 'CACHE_MACHINE_USE_REDIS', False):
-    redis = get_redis_backend()
+elif isinstance(cache, caching.backends.redis_backend.CacheClass):
+    redis = cache.redis
     invalidator = RedisInvalidator()
 else:
     invalidator = Invalidator()
