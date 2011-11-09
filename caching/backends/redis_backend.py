@@ -44,14 +44,22 @@ class CacheClass(BaseCache):
             db = int(db)
         except (ValueError, TypeError):
             db = 1
-        if ':' in server:
-            host, port = server.split(':')
+        if '/' in server:
+            host, db_num = server.split('/')
+            try:
+                db = int(db_num)
+            except (ValueError, TypeError):
+                pass
+        else:
+            host = server or 'localhost'
+        
+        if ':' in host:
+            host, port = host.split(':')
             try:
                 port = int(port)
             except (ValueError, TypeError):
                 port = 6379
         else:
-            host = server or 'localhost'
             port = 6379
         self._cache = redis.Redis(host=host, port=port, db=db, password=password)
 
