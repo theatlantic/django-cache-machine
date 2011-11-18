@@ -19,6 +19,15 @@ except ImportError:
 CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
 FETCH_BY_ID = getattr(settings, 'FETCH_BY_ID', False)
 FLUSH = CACHE_PREFIX + ':flush:'
+CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
+
+class NullHandler(logging.Handler):
+
+    def emit(self, record):
+        pass
+
+debug_log = logging.getLogger('caching')
+debug_log.addHandler(NullHandler())
 
 log = logging.getLogger('caching.invalidation')
 
@@ -82,6 +91,12 @@ def safe_redis(return_type):
 
 class Invalidator(object):
 
+    def get_query_string(self, key):
+        sql = cache.get('sql:%s' % key)
+        if not sql:
+            return key
+        return sql
+
     def invalidate_keys(self, keys):
         """Invalidate all the flush lists named by the list of ``keys``."""
         if not keys:
@@ -89,6 +104,19 @@ class Invalidator(object):
         flush, flush_keys = self.find_flush_lists(keys)
 
         if flush:
+            if CACHE_DEBUG:
+                for k in keys:
+                    sql = self.get_query_string(k)
+                    debug_log.debug("Flushing object    %s" % sql)
+                    assoc_flush, assoc_flush_keys = self.find_flush_lists([k])
+                    if assoc_flush:
+                        for k in assoc_flush:
+                            sql = self.get_query_string(k)
+                            debug_log.debug("Flushing query     %s" % sql)
+                    if assoc_flush_keys:
+                        for k in assoc_flush_keys:
+                            sql = self.get_query_string(k)
+                            debug_log.debug("Flushing flush_key %s" % sql)
             cache.set_many(dict((k, None) for k in flush), 5)
         if flush_keys:
             self.clear_flush_lists(flush_keys)

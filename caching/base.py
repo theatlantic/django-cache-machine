@@ -90,7 +90,9 @@ class CacheMachine(object):
 
     def query_key(self):
         """Generate the cache key for this query."""
-        return make_key('qs:%s' % self.query_string, with_locale=False)
+        key = make_key('qs:%s' % self.query_string, with_locale=False)
+        cache.set('sql:%s' % key, self.query_string)
+        return key
 
     def __iter__(self):
         try:
