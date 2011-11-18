@@ -8,7 +8,7 @@ from django.db.models import signals
 from django.db.models.sql import query
 from django.utils import encoding
 
-from .invalidation import invalidator, flush_key, make_key, byid
+from .invalidation import invalidator, flush_key, model_flush_key, make_key, byid
 
 from datetime import timedelta
 second_delta = timedelta(seconds=1)
@@ -61,6 +61,19 @@ class CachingManager(models.Manager):
             if hasattr(o, '_cache_keys'):
                 keys += list(o._cache_keys())
         """Invalidate all the flush lists associated with ``objects``."""
+        if len(keys) > 0:
+            invalidator.invalidate_keys(keys)
+
+    def invalidate_model(self, *objects):
+        """
+        Invalidate all the flush lists associated with the models of ``objects``.
+        
+        This effectively flushes all queries linked to a given model.
+        """
+        keys = []
+        for o in objects:
+            if hasattr(o, '_model_keys'):
+                keys += list(o._model_keys())
         if len(keys) > 0:
             invalidator.invalidate_keys(keys)
 
@@ -245,6 +258,31 @@ class CachingMixin:
         """
         key_parts = ('o', cls._meta, pk)
         return ':'.join(map(encoding.smart_unicode, key_parts))
+
+    def model_flush_key(self):
+        return model_flush_key(self.model_key)
+
+    @property
+    def model_key(self):
+        """Returns a cache key based on the object's model."""
+        return self._model_key()
+
+    @classmethod
+    def _model_key(cls):
+        """
+        Return a string that uniquely identifies the model the object
+        belongs to.
+        
+        For the Addon class, we get "m:addons.addon".
+        """
+        key_parts = ('m', cls._meta)
+        return ':'.join(map(encoding.smart_unicode, key_parts))
+
+    def _model_keys(self):
+        """
+        Return the model cache key for self plus all related foreign keys.
+        """
+        return (self.model_key,) + self._cache_keys()[1:]
 
     def _cache_keys(self):
         """Return the cache key for self plus all related foreign keys."""
