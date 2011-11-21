@@ -4,6 +4,7 @@ import hashlib
 import logging
 import socket
 import sys
+from itertools import chain
 
 from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
@@ -19,6 +20,7 @@ except ImportError:
 CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
 FETCH_BY_ID = getattr(settings, 'FETCH_BY_ID', False)
 FLUSH = CACHE_PREFIX + ':flush:'
+MODEL_FLUSH = CACHE_PREFIX + ':mflush:'
 CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
 
 class NullHandler(logging.Handler):
@@ -54,6 +56,11 @@ def flush_key(obj):
     """We put flush lists in the flush: namespace."""
     key = obj if isinstance(obj, basestring) else obj.cache_key
     return FLUSH + make_key(key, with_locale=False)
+
+def model_flush_key(obj):
+    """We put model flush lists in the mflush: namespace."""
+    key = obj if isinstance(obj, basestring) else obj.model_cache_key
+    return MODEL_FLUSH + make_key(key, with_locale=False)
 
 
 def byid(obj):
@@ -125,7 +132,9 @@ class Invalidator(object):
         # Add this query to the flush list of each object.  We include
         # query_flush so that other things can be cached against the queryset
         # and still participate in invalidation.
-        flush_keys = [o.flush_key() for o in objects]
+        flush_keys = list(chain.from_iterable(
+            [[o.flush_key(), o.model_flush_key()] for o in objects]
+        ))
 
         flush_lists = collections.defaultdict(set)
         for key in flush_keys:
@@ -150,7 +159,7 @@ class Invalidator(object):
         lists found therein.  Returns ({objects to flush}, {flush keys found}).
         """
         new_keys = keys = set(map(flush_key, keys))
-        flush = set(k for k in keys if not k.startswith(FLUSH))
+        flush = set(k for k in keys if not k.startswith(FLUSH) and not k.startswith(MODEL_FLUSH))
 
         # Add other flush keys from the lists, which happens when a parent
         # object includes a foreign key.
@@ -160,7 +169,7 @@ class Invalidator(object):
             for k in to_flush:
                 if k.startswith(FLUSH):
                     new_keys.add(k)
-                else:
+                elif not k.startswith(MODEL_FLUSH):
                     flush.add(k)
             diff = new_keys.difference(keys)
             if diff:

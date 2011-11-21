@@ -6,9 +6,10 @@ from django.core.cache import cache, parse_backend_uri
 from django.db import models
 from django.db.models import signals
 from django.db.models.sql import query
+from django.db.models.sql.where import WhereNode, Constraint
 from django.utils import encoding
 
-from .invalidation import invalidator, flush_key, make_key, byid
+from .invalidation import invalidator, flush_key, model_flush_key, make_key, byid
 
 from datetime import timedelta
 second_delta = timedelta(seconds=1)
@@ -37,10 +38,49 @@ class CachingManager(models.Manager):
         return CachingQuerySet(self.model)
 
     def contribute_to_class(self, cls, name):
+        signals.pre_save.connect(self.pre_save, sender=cls)
         signals.post_save.connect(self.post_save, sender=cls)
         signals.post_delete.connect(self.post_delete, sender=cls)
         signals.m2m_changed.connect(self.m2m_changed)
         return super(CachingManager, self).contribute_to_class(cls, name)
+
+    def pre_save(self, sender, instance, raw, **kwargs):
+        """
+        Flush all cached queries associated with a model if a field has been
+        changed that is a known constraint in an already cached query.
+        
+        TODO: Associate flush lists with constraint columns, so that we don't
+        need to flush the whole table.
+        """
+        # The raw boolean means we're loading the database from a fixture, so
+        # we don't want to mess with it.
+        if raw:
+            return
+
+        # We only need to flush the model if the post already exists; when new
+        # instances are created it flushes the model cache, so calling flush
+        # here would be redundant
+        if not instance.id:
+            return
+        
+        cls = instance.__class__
+        if not hasattr(cls.objects, 'invalidate_model'):
+            return
+        
+        # Grab the original object, before the to-be-saved changes
+        orig = cls.objects.no_cache().get(pk=instance.id)
+        
+        constraint_key = 'cols:%s' % instance.model_key
+        flush_cols = invalidator.get_flush_lists([constraint_key])
+        if len(flush_cols) == 0:
+            return
+        
+        for col in flush_cols:
+            if not hasattr(orig, col) or not hasattr(instance, col):
+                continue
+            if getattr(orig, col) != getattr(instance, col):
+                cls.objects.invalidate_model()
+                return
 
     def post_save(self, instance, created, **kwargs):
         self.invalidate(instance)
@@ -63,6 +103,23 @@ class CachingManager(models.Manager):
         """Invalidate all the flush lists associated with ``objects``."""
         if len(keys) > 0:
             invalidator.invalidate_keys(keys)
+
+    def invalidate_model(self):
+        """
+        Invalidate all the flush lists associated with the models of ``objects``.
+        
+        This effectively flushes all queries linked to a given model.
+        """
+        model_key = self.model._model_key()
+        if CACHE_DEBUG:
+            log.debug("Invalidating model %s" % model_key[2:])
+        if not hasattr(self.model, '_model_key'):
+            raise Exception((
+                "The model Manager of %s uses caching, but the " + \
+                "model does not. Needs CachingMixIn."
+            ) % ".".join([self.model.__module__, self.model.__name__]))
+        invalidator.invalidate_keys([model_key])
+        cache.delete(u'cols:%s' % model_key)
 
     def raw(self, raw_query, params=None, *args, **kwargs):
         return CachingRawQuerySet(raw_query, self.model, params=params,
@@ -132,7 +189,6 @@ class CacheMachine(object):
         cache.add(query_key, objects, timeout=self.timeout)
         invalidator.cache_objects(objects, query_key, query_flush)
 
-
 class CachingQuerySet(models.query.QuerySet):
 
     def __init__(self, *args, **kw):
@@ -145,8 +201,43 @@ class CachingQuerySet(models.query.QuerySet):
     def query_key(self):
         sql, params = self.query.get_compiler(using=self.db).as_sql()
         return sql % params
+    
+    def get_constraints(self):
+        """
+        Get the table/column constraints associated with the queryset's query.
+        
+        TODO: Look at join information.
+        """
+        constraints = {}
+        stack = [self.query.where]
+        while stack:
+            curr_where = stack.pop()
+            for k, v in curr_where.__dict__.items():
+                if isinstance(v, (list, tuple)):
+                    for i, item in enumerate(v):
+                        if isinstance(item, WhereNode):
+                            stack.append(item)
+                        elif isinstance(item, (tuple)):
+                            if len(item) > 0 and isinstance(item[0], Constraint):
+                                constraint = item[0]
+                                model = constraint.field.model
+                                name = constraint.field.name
+                                if not hasattr(model, '_model_key'):
+                                    continue
+                                # If the primary key, don't add to list
+                                if model._meta.pk and model._meta.pk.name == name:
+                                    continue
+                                constraint_key = u'cols:%s' % model._model_key()
+                                if constraint_key not in constraints:
+                                    constraints[constraint_key] = set()
+                                if name not in constraints[constraint_key]:
+                                    constraints[constraint_key].add(name)
+        return constraints
+
 
     def iterator(self):
+        constraints = self.get_constraints()
+        invalidator.add_to_flush_list(constraints)
         iterator = super(CachingQuerySet, self).iterator
         if self.timeout == NO_CACHE:
             return iter(iterator())
@@ -247,6 +338,31 @@ class CachingMixin:
         """
         key_parts = ('o', cls._meta, pk)
         return ':'.join(map(encoding.smart_unicode, key_parts))
+
+    def model_flush_key(self):
+        return model_flush_key(self.model_key)
+
+    @property
+    def model_key(self):
+        """Returns a cache key based on the object's model."""
+        return self._model_key()
+
+    @classmethod
+    def _model_key(cls):
+        """
+        Return a string that uniquely identifies the model the object
+        belongs to.
+        
+        For the Addon class, we get "m:addons.addon".
+        """
+        key_parts = ('m', cls._meta)
+        return ':'.join(map(encoding.smart_unicode, key_parts))
+
+    def _model_keys(self):
+        """
+        Return the model cache key for self plus all related foreign keys.
+        """
+        return (self.model_key,) + self._cache_keys()[1:]
 
     def _cache_keys(self):
         """Return the cache key for self plus all related foreign keys."""
