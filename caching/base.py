@@ -9,7 +9,7 @@ from django.db.models.sql import query
 from django.db.models.sql.where import WhereNode, Constraint
 from django.utils import encoding
 
-from .invalidation import invalidator, flush_key, model_flush_key, make_key, byid
+from .invalidation import invalidator, flush_key, make_key, byid
 
 from datetime import timedelta
 second_delta = timedelta(seconds=1)
@@ -338,7 +338,7 @@ class CachingMixin:
         return ':'.join(map(encoding.smart_unicode, key_parts))
 
     def model_flush_key(self):
-        return model_flush_key(self.model_key)
+        return flush_key(self.model_key)
 
     @property
     def model_key(self):
