@@ -169,11 +169,6 @@ class CacheMachine(object):
                 yield obj
             return
 
-        # If the query is deferred, un-defer it before caching, to prevent
-        # infinite loops
-        load_fields, is_deferred = self.queryset.query.deferred_loading
-        if is_deferred and len(load_fields) > 1:
-            self.queryset.query.add_immediate_loading(load_fields)
         iterator = self.iter_function()
 
         # Do the database query, cache it once we have all the objects.
