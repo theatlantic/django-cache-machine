@@ -119,11 +119,15 @@ class CachingManager(models.Manager):
                 "model does not. Needs CachingMixIn."
             ) % ".".join([self.model.__module__, self.model.__name__]))
         invalidator.invalidate_keys([model_key])
-        cache.delete(u'cols:%s' % model_key)
+        # Set cols to none for 5 seconds before expiring (prevents race condition)
+        cache.set(u'cols:%s' % model_key, None, 5)
 
-    def raw(self, raw_query, params=None, *args, **kwargs):
-        return CachingRawQuerySet(raw_query, self.model, params=params,
-                                  using=self._db, *args, **kwargs)
+    # Caching raw querysets seems too dangerous, especially since we
+    # can't inspect constraints; disabling
+    #
+    # def raw(self, raw_query, params=None, *args, **kwargs):
+    #     return CachingRawQuerySet(raw_query, self.model, params=params,
+    #                               using=self._db, *args, **kwargs)
 
     def cache(self, timeout=None):
         return self.get_query_set().cache(timeout)
@@ -140,10 +144,12 @@ class CacheMachine(object):
     called to get an iterator over some database results.
     """
 
-    def __init__(self, query_string, iter_function, timeout=None):
+    def __init__(self, query_string, iter_function, queryset, cached=None):
         self.query_string = query_string
         self.iter_function = iter_function
-        self.timeout = timeout
+        self.timeout = getattr(queryset, 'timeout', None)
+        self.queryset = queryset
+        self.cached = cached
 
     def query_key(self):
         """Generate the cache key for this query."""
@@ -155,19 +161,22 @@ class CacheMachine(object):
         except query.EmptyResultSet:
             raise StopIteration
 
-        # Try to fetch from the cache.
-        cached = cache.get(query_key)
-        if cached is not None:
+        if self.cached is not None and not isinstance(self.cached, int):
             if CACHE_DEBUG:
                 log.debug('cache hit: %s' % self.query_string)
-            for obj in cached:
+            for obj in self.cached:
                 obj.from_cache = True
                 yield obj
             return
 
-        # Do the database query, cache it once we have all the objects.
+        # If the query is deferred, un-defer it before caching, to prevent
+        # infinite loops
+        load_fields, is_deferred = self.queryset.query.deferred_loading
+        if is_deferred and len(load_fields) > 1:
+            self.queryset.query.add_immediate_loading(load_fields)
         iterator = self.iter_function()
 
+        # Do the database query, cache it once we have all the objects.
         to_cache = []
         try:
             while True:
@@ -186,20 +195,9 @@ class CacheMachine(object):
         query_flush = flush_key(self.query_string)
         cache.add(query_key, objects, timeout=self.timeout)
         invalidator.cache_objects(objects, query_key, query_flush)
+        constraints = self.get_constraints()
+        invalidator.add_to_flush_list(constraints)
 
-class CachingQuerySet(models.query.QuerySet):
-
-    def __init__(self, *args, **kw):
-        super(CachingQuerySet, self).__init__(*args, **kw)
-        self.timeout = None
-
-    def flush_key(self):
-        return flush_key(self.query_key())
-
-    def query_key(self):
-        sql, params = self.query.get_compiler(using=self.db).as_sql()
-        return sql % params
-    
     def get_constraints(self):
         """
         Get the table/column constraints associated with the queryset's query.
@@ -207,7 +205,7 @@ class CachingQuerySet(models.query.QuerySet):
         TODO: Look at join information.
         """
         constraints = {}
-        stack = [self.query.where]
+        stack = [self.queryset.query.where]
         while stack:
             curr_where = stack.pop()
             for k, v in curr_where.__dict__.items():
@@ -232,10 +230,20 @@ class CachingQuerySet(models.query.QuerySet):
                                     constraints[constraint_key].add(name)
         return constraints
 
+class CachingQuerySet(models.query.QuerySet):
+
+    def __init__(self, *args, **kw):
+        super(CachingQuerySet, self).__init__(*args, **kw)
+        self.timeout = None
+
+    def flush_key(self):
+        return flush_key(self.query_key())
+
+    def query_key(self):
+        sql, params = self.query.get_compiler(using=self.db).as_sql()
+        return sql % params
 
     def iterator(self):
-        constraints = self.get_constraints()
-        invalidator.add_to_flush_list(constraints)
         iterator = super(CachingQuerySet, self).iterator
         if self.timeout == NO_CACHE:
             return iter(iterator())
@@ -245,9 +253,19 @@ class CachingQuerySet(models.query.QuerySet):
                 query_string = self.query_key()
             except query.EmptyResultSet:
                 return iterator()
+            machine = CacheMachine(query_string, iterator, queryset=self)
+            cached = cache.get(machine.query_key(), default=-1)
+            # If the value is None, that means it has a lock on it after
+            # being cleared (if the key doesn't exist, we would get -1).
+            # We return the regular queryset iterator, which yields an
+            # uncached result set.
+            if cached is None:
+                return iter(iterator())
+            else:
+                machine.cached = cached
             if FETCH_BY_ID:
-                iterator = self.fetch_by_id
-            return iter(CacheMachine(query_string, iterator, self.timeout))
+                machine.iterator = self.fetch_by_id
+            return iter(machine)
 
     def fetch_by_id(self):
         """
@@ -360,7 +378,7 @@ class CachingMixin:
         """
         Return the model cache key for self plus all related foreign keys.
         """
-        return (self.model_key,) + self._cache_keys()[1:]
+        return (self.model_key,) + self._cache_keys()
 
     def _cache_keys(self):
         """Return the cache key for self plus all related foreign keys."""
@@ -377,7 +395,7 @@ class CachingRawQuerySet(models.query.RawQuerySet):
     def __iter__(self):
         iterator = super(CachingRawQuerySet, self).__iter__
         sql = self.raw_query % tuple(self.params)
-        for obj in CacheMachine(sql, iterator):
+        for obj in CacheMachine(sql, iterator, queryset=self):
             yield obj
         raise StopIteration
 
@@ -411,8 +429,11 @@ def cached_with(obj, f, f_key, timeout=None):
 
     key = '%s:%s' % tuple(map(encoding.smart_str, (f_key, obj_key)))
     # Put the key generated in cached() into this object's flush list.
-    invalidator.add_to_flush_list(
-        {obj.flush_key(): [_function_cache_key(key)]})
+    func_cache_key = _function_cache_key(key)
+    invalidator.add_to_flush_list({
+        obj.flush_key(): [func_cache_key],
+        obj.model_flush_key(): [func_cache_key],
+    })
     return cached(f, key, timeout)
 
 

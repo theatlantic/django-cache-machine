@@ -179,11 +179,12 @@ class RedisInvalidator(Invalidator):
     @safe_redis(None)
     def add_to_flush_list(self, mapping):
         """Update flush lists with the {flush_key: [query_key,...]} map."""
-        pipe = redis.pipeline(transaction=False)
         for key, list_ in mapping.items():
             for query_key in list_:
-                pipe.sadd(self.safe_key(key), query_key)
-        pipe.execute()
+                try:
+                    redis.sadd(self.safe_key(key), query_key)
+                except redislib.RedisError:
+                    pass
 
     @safe_redis(set)
     def get_flush_lists(self, keys):
