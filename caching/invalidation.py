@@ -18,7 +18,6 @@ except ImportError:
 
 
 CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
-FETCH_BY_ID = getattr(settings, 'FETCH_BY_ID', False)
 FLUSH = CACHE_PREFIX + ':flush:'
 
 log = logging.getLogger('caching.invalidation')
@@ -46,11 +45,6 @@ def flush_key(obj):
     """We put flush lists in the flush: namespace."""
     key = obj if isinstance(obj, basestring) else obj.cache_key
     return FLUSH + make_key(key, with_locale=False)
-
-
-def byid(obj):
-    key = obj if isinstance(obj, basestring) else obj._cache_key(obj.pk)
-    return make_key('byid:' + key)
 
 
 def safe_redis(return_type):
@@ -118,8 +112,6 @@ class Invalidator(object):
                         flush_lists[model_flush_key].add(obj_flush)
                 if key != obj_flush:
                     flush_lists[key].add(obj_flush)
-                if FETCH_BY_ID:
-                    flush_lists[key].add(byid(obj))
         self.add_to_flush_list(flush_lists)
 
     def find_flush_lists(self, keys):
