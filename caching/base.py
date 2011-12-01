@@ -41,7 +41,6 @@ class CachingManager(models.Manager):
         signals.pre_save.connect(self.pre_save, sender=cls)
         signals.post_save.connect(self.post_save, sender=cls)
         signals.post_delete.connect(self.post_delete, sender=cls)
-        signals.m2m_changed.connect(self.m2m_changed)
         return super(CachingManager, self).contribute_to_class(cls, name)
 
     def pre_save(self, sender, instance, raw, **kwargs):
@@ -79,11 +78,14 @@ class CachingManager(models.Manager):
             if not hasattr(orig, col) or not hasattr(instance, col):
                 continue
             if getattr(orig, col) != getattr(instance, col):
-                cls.objects.invalidate_model()
+                instance.invalidate_model = True
                 return
 
     def post_save(self, instance, created, **kwargs):
-        self.invalidate(instance)
+        if instance.invalidate_model:
+            self.invalidate_model()
+        else:
+            self.invalidate(instance)
         if created:
             invalidator.clear()
         
@@ -120,7 +122,7 @@ class CachingManager(models.Manager):
             ) % ".".join([self.model.__module__, self.model.__name__]))
         invalidator.invalidate_keys([model_key])
         # Set cols to none for 5 seconds before expiring (prevents race condition)
-        cache.set(u'cols:%s' % model_key, None, 5)
+        cache.setex(u'cols:%s' % model_key, None, 5)
 
     # Caching raw querysets seems too dangerous, especially since we
     # can't inspect constraints; disabling
@@ -189,8 +191,10 @@ class CacheMachine(object):
         query_key = self.query_key()
         query_flush = flush_key(self.query_string)
         cache.add(query_key, objects, timeout=self.timeout)
-        invalidator.cache_objects(objects, query_key, query_flush)
         constraints = self.get_constraints()
+        model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
+        model_flush_keys.add(flush_key(self.queryset.model._model_key()))
+        invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
         invalidator.add_to_flush_list(constraints)
 
     def get_constraints(self):
@@ -331,7 +335,10 @@ class CachingQuerySet(models.query.QuerySet):
 
 class CachingMixin:
     """Inherit from this class to get caching and invalidation helpers."""
-
+    
+    """Whether to invalidate the model in the post_save. Set in the pre_save"""
+    invalidate_model = False
+    
     def flush_key(self):
         return flush_key(self)
 
@@ -366,7 +373,7 @@ class CachingMixin:
         
         For the Addon class, we get "m:addons.addon".
         """
-        key_parts = ('m', cls._meta)
+        key_parts = ('m', cls._meta.db_table)
         return ':'.join(map(encoding.smart_unicode, key_parts))
 
     def _model_keys(self):
@@ -407,7 +414,7 @@ def cached(function, key_, duration=None):
         if CACHE_DEBUG:
             log.debug('cache miss for %s' % key)
         val = function()
-        cache.set(key, val, duration)
+        cache.setex(key, val, duration)
     elif CACHE_DEBUG:
         log.debug('cache hit for %s' % key)
     return val

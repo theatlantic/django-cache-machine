@@ -90,17 +90,19 @@ class Invalidator(object):
         flush, flush_keys = self.find_flush_lists(keys)
 
         if flush:
-            cache.set_many(dict((k, None) for k in flush), 5)
+            cache.set_many_ex(dict((k, None) for k in flush), 5)
         if flush_keys:
             self.clear_flush_lists(flush_keys)
 
-    def cache_objects(self, objects, query_key, query_flush):
+    def cache_objects(self, objects, query_key, query_flush, model_flush_keys=None):
         # Add this query to the flush list of each object.  We include
         # query_flush so that other things can be cached against the queryset
         # and still participate in invalidation.
         flush_keys = list(chain.from_iterable(
             [[o.flush_key(), o.model_flush_key()] for o in objects]
         ))
+        if model_flush_keys is not None:
+            flush_keys.extend(list(model_flush_keys))
 
         flush_lists = collections.defaultdict(set)
         for key in flush_keys:
@@ -111,6 +113,9 @@ class Invalidator(object):
         for obj in objects:
             obj_flush = obj.flush_key()
             for key in map(flush_key, obj._cache_keys()):
+                if model_flush_keys is not None:
+                    for model_flush_key in model_flush_keys:
+                        flush_lists[model_flush_key].add(obj_flush)
                 if key != obj_flush:
                     flush_lists[key].add(obj_flush)
                 if FETCH_BY_ID:
