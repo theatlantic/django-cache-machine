@@ -251,6 +251,116 @@ class CachingQuerySet(models.query.QuerySet):
         qs.timeout = self.timeout
         return qs
 
+    _cachemachine_column_map = {}
+    _cachemachine_table_map = {}
+    _cachemachine_compiler = None
+
+    @property
+    def cachemachine_compiler(self):
+        if self._cachemachine_compiler is None:
+            compiler = self.query.get_compiler(using=self.db)
+            compiler.pre_sql_setup()
+            compiler.get_columns()
+            self._cachemachine_compiler = compiler
+        return self._cachemachine_compiler
+
+    def get_columns_for_order_by(self, opts=None):
+        columns = tuple()
+        column_map = self._cachemachine_column_map
+        if opts is None:
+            opts = self.query.model._meta
+        if opts.db_table not in column_map:
+            column_map[opts.db_table] = {}
+        only_load = self.cachemachine_compiler.deferred_to_columns()
+        for field, model in opts.get_fields_with_model():
+            alias = self.query.included_inherited_models[model]
+            table = self.query.alias_map[alias][models.sql.constants.TABLE_NAME]
+            if table in only_load and field.column not in only_load[table]:
+                continue
+            columns += ((table, field.name),)
+            column_map[opts.db_table][field.column] = field.name
+        return columns, column_map
+
+    def map_column_to_field_name(self, table, col):
+        table_map = self._cachemachine_table_map
+        column_map = self._cachemachine_column_map
+        
+        if len(table_map.keys()) == 0:
+            self.get_constraints()
+        
+        field = col
+        
+        if table in table_map and table not in column_map:
+            model = table_map[table]
+            _, table_col_map = self.get_columns_for_order_by(model._meta)
+            column_map.update(table_col_map)
+        if table in column_map and col in column_map[table]:
+            field = column_map[table][col]
+        
+        return field
+
+    def has_offset_or_limit(self):
+        """Whether the query has a LIMIT or OFFSET defined."""
+        return self.query.low_mark != 0 or self.query.high_mark is not None
+
+    def get_ordering_fields(self):
+        table_map = self._cachemachine_table_map
+                
+        compiler = self.cachemachine_compiler
+        
+        if self.query.extra_order_by:
+            ordering = self.query.extra_order_by
+        elif not self.query.default_ordering:
+            ordering = self.query.order_by
+        else:
+            ordering = self.query.order_by or self.query.model._meta.ordering
+        
+        select_aliases = compiler._select_aliases
+        all_columns, column_map = self.get_columns_for_order_by()
+        
+        # used to check whether we've already seen something
+        processed_pairs = set()
+        order_fields = tuple()
+        # TODO: Work out how to detect ORDER BYs passed as parameters, e.g.
+        # "ORDER BY ? DESC"
+        for field in ordering:
+            if field == '?':
+                continue
+            if isinstance(field, int):
+                field = abs(field)
+                if field < len(all_columns):
+                    table, field_name = all_columns[field]
+                    if (table, field_name) not in processed_pairs:
+                        processed_pairs.add((table, field_name))
+                        order_fields += ((table, field_name),)
+                continue
+            col, order = models.sql.query.get_order_dir(field)
+            # This is something like a HAVING COUNT(*) > X, not relevant
+            if col in self.query.aggregate_select:
+                continue
+            if '.' in field:
+                # This came in through an extra(order_by=...) addition. Pass it
+                # on verbatim.
+                table, col = col.split('.', 1)
+                field_name = self.map_column_to_field_name(table, col)
+                if (table, field_name) not in processed_pairs:
+                    processed_pairs.add((table, field_name))
+                    order_fields += ((table, field_name),)
+            elif col not in self.query.extra_select:
+                # 'col' is of the form 'field' or 'field1__field2' or
+                # '-field1__field2__field', etc.
+                for table, col, _ in compiler.find_ordering_name(field, self.query.model._meta):
+                    field_name = self.map_column_to_field_name(table, col)
+                    if (table, field_name) not in processed_pairs:
+                        processed_pairs.add((table, field_name))
+                        order_fields += ((table, field_name),)
+            else:
+                # TODO: Work out what to do when the order by is based on a
+                # field in an extra_select... prevent caching?
+                pass
+        
+        return order_fields
+            
     def get_constraints(self):
         """
         Get the table/column constraints associated with the queryset's query.
@@ -258,6 +368,7 @@ class CachingQuerySet(models.query.QuerySet):
         TODO: Look at join information.
         """
         constraints = collections.defaultdict(set)
+        table_map = self._cachemachine_table_map
         stack = [self.query.where]
         while stack:
             curr_where = stack.pop()
@@ -277,8 +388,15 @@ class CachingQuerySet(models.query.QuerySet):
                                 if model._meta.pk and model._meta.pk.name == name:
                                     continue
                                 constraint_key = u'cols:%s' % model._model_key()
+                                if model._meta.db_table not in table_map:
+                                    table_map[model._meta.db_table] = model
                                 if name not in constraints[constraint_key]:
                                     constraints[constraint_key].add(name)
+        if self.has_offset_or_limit():
+            order_fields = self.get_ordering_fields()
+            for table, name in order_fields:
+                constraint_key = u'cols:m:%s' % table
+                constraints[constraint_key].add(name)
         return constraints
 
 class CachingMixin:
