@@ -196,7 +196,7 @@ class CacheMachine(object):
         model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
         model_flush_keys.add(flush_key(self.queryset.model._model_key()))
         invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
-        invalidator.add_to_flush_list(constraints)
+        invalidator.add_to_flush_list(constraints, watch_key=query_flush)
 
     column_map = {}
     table_map = {}
@@ -324,14 +324,14 @@ class CacheMachine(object):
                                 constraint_key = u'cols:%s' % model._model_key()
                                 if model._meta.db_table not in self.table_map:
                                     self.table_map[model._meta.db_table] = model
-                                    constraints[constraint_key].add(name)
+                                constraints[constraint_key].add(name)
         if self.has_offset_or_limit():
             order_fields = self.get_ordering_fields()
             for table, name in order_fields:
                 constraint_key = u'cols:m:%s' % table
                 constraints[constraint_key].add(name)
         return constraints
-
+    
 
 class CachingQuerySet(models.query.QuerySet):
     
@@ -496,7 +496,7 @@ def cached_with(obj, f, f_key, timeout=None):
     invalidator.add_to_flush_list({
         obj.flush_key(): [func_cache_key],
         obj.model_flush_key(): [func_cache_key],
-    })
+    }, watch_key=obj.flush_key())
     return cached(f, key, timeout)
 
 

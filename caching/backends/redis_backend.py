@@ -195,13 +195,23 @@ class CacheClass(BaseCache):
                                    for key, value in safe_data.iteritems()))
             map(self.expire, safe_data, [timeout]*len(safe_data))
 
-    def set_many_ex(self, data, timeout=None, version=None):
+    def set_many_ex(self, data, timeout=None, version=None, watch_key=None):
         if timeout is None:
             timeout = self.default_timeout
-        for key, value in data.iteritems():
-            key = self.make_key(key, version=version)
-            self._cache.setex(key, pickle.dumps(value), timeout)
-        
+        pipe = self._cache.pipeline()
+        while 1:
+            try:
+                if watch_key is not None:
+                    pipe.watch(watch_key)
+                for key, value in data.iteritems():
+                    key = self.make_key(key, version=version)
+                    self._cache.setex(key, pickle.dumps(value), timeout)
+                pipe.execute()
+                break
+            except WatchError:
+                continue
+            finally:
+                pipe.reset()
 
     def close(self, **kwargs):
         """
