@@ -9,7 +9,7 @@ from django.db.models.sql import query
 from django.db.models.sql.where import WhereNode, Constraint
 from django.utils import encoding
 
-from .invalidation import invalidator, flush_key, make_key, byid
+from .invalidation import invalidator, flush_key, make_key
 
 from datetime import timedelta
 second_delta = timedelta(seconds=1)
