@@ -1,3 +1,4 @@
+import collections
 import functools
 import logging
 
@@ -5,8 +6,6 @@ from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.db import models
 from django.db.models import signals
-from django.db.models.sql import query
-from django.db.models.sql.where import WhereNode, Constraint
 from django.utils import encoding
 
 from .invalidation import invalidator, flush_key, make_key
@@ -212,7 +211,7 @@ class CachingQuerySet(models.query.QuerySet):
             try:
                 # Work-around for Django #12717.
                 query_string = self.query_string()
-            except query.EmptyResultSet:
+            except models.sql.query.EmptyResultSet:
                 return iterator()
             
             if self.cache_machine is not None:
@@ -258,17 +257,17 @@ class CachingQuerySet(models.query.QuerySet):
         
         TODO: Look at join information.
         """
-        constraints = {}
+        constraints = collections.defaultdict(set)
         stack = [self.query.where]
         while stack:
             curr_where = stack.pop()
             for k, v in curr_where.__dict__.items():
                 if isinstance(v, (list, tuple)):
                     for i, item in enumerate(v):
-                        if isinstance(item, WhereNode):
+                        if isinstance(item, models.sql.where.WhereNode):
                             stack.append(item)
                         elif isinstance(item, (tuple)):
-                            if len(item) > 0 and isinstance(item[0], Constraint):
+                            if len(item) > 0 and isinstance(item[0], models.sql.where.Constraint):
                                 constraint = item[0]
                                 model = constraint.field.model
                                 name = constraint.field.name
@@ -278,8 +277,6 @@ class CachingQuerySet(models.query.QuerySet):
                                 if model._meta.pk and model._meta.pk.name == name:
                                     continue
                                 constraint_key = u'cols:%s' % model._model_key()
-                                if constraint_key not in constraints:
-                                    constraints[constraint_key] = set()
                                 if name not in constraints[constraint_key]:
                                     constraints[constraint_key].add(name)
         return constraints
