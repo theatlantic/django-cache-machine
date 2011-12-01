@@ -228,9 +228,6 @@ class CacheMachine(object):
         return columns
 
     def map_column_to_field_name(self, table, col):
-        if len(self.table_map) == 0:
-            self.get_constraints()
-        
         field = col
         
         if table in self.table_map and table not in self.column_map:
