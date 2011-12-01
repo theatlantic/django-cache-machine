@@ -124,7 +124,7 @@ class CachingManager(models.Manager):
             ) % ".".join([self.model.__module__, self.model.__name__]))
         invalidator.invalidate_keys([model_key])
         # Set cols to none for 5 seconds before expiring (prevents race condition)
-        cache.setex(u'cols:%s' % model_key, None, 5)
+        cache.delete(u'cols:%s' % model_key)
 
     def cache(self, timeout=None):
         return self.get_query_set().cache(timeout)
