@@ -27,6 +27,10 @@ NO_CACHE = -1
 CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
 CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
 
+class StopCaching(Exception):
+    """Raised when a query is determined to be uncacheable"""
+    pass
+
 class CachingManager(models.Manager):
 
     # Tell Django to use this manager when resolving foreign keys.
@@ -142,6 +146,7 @@ class CacheMachine(object):
         self.iter_function = queryset.iterator(skip_cache=True)
         self.timeout = getattr(queryset, 'timeout', None)
         self.queryset = queryset
+        self.query = self.queryset.query
         self.cached = cached
 
     def query_key(self):
@@ -153,6 +158,11 @@ class CacheMachine(object):
             query_key = self.query_key()
         except query.EmptyResultSet:
             raise StopIteration
+
+        # If anything has been passed to the queryset via extra, we can't
+        # ensure that the proper fields will be associated, so we don't cache
+        if len(self.query.extra) > 0:
+            raise StopCaching
 
         if self.cached is not None and not isinstance(self.cached, int):
             if CACHE_DEBUG:
@@ -182,11 +192,146 @@ class CacheMachine(object):
         query_key = self.query_key()
         query_flush = flush_key(self.query_string)
         cache.add(query_key, objects, timeout=self.timeout)
-        constraints = self.queryset.get_constraints()
+        constraints = self.get_constraints()
         model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
         model_flush_keys.add(flush_key(self.queryset.model._model_key()))
         invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
         invalidator.add_to_flush_list(constraints)
+
+    column_map = {}
+    table_map = {}
+    _compiler = None
+
+    @property
+    def compiler(self):
+        if self._compiler is None:
+            compiler = self.query.get_compiler(using=self.queryset.db)
+            compiler.pre_sql_setup()
+            compiler.get_columns()
+            self._compiler = compiler
+        return self._compiler
+
+    def get_columns_for_order_by(self, opts=None):
+        columns = tuple()
+        if opts is None:
+            opts = self.query.model._meta
+        if opts.db_table not in self.column_map:
+            self.column_map[opts.db_table] = {}
+        only_load = self.compiler.deferred_to_columns()
+        for field, model in opts.get_fields_with_model():
+            alias = self.query.included_inherited_models[model]
+            table = self.query.alias_map[alias][models.sql.constants.TABLE_NAME]
+            if table in only_load and field.column not in only_load[table]:
+                continue
+            columns += ((table, field.name),)
+            self.column_map[opts.db_table][field.column] = field.name
+        return columns
+
+    def map_column_to_field_name(self, table, col):
+        if len(self.table_map) == 0:
+            self.get_constraints()
+        
+        field = col
+        
+        if table in self.table_map and table not in self.column_map:
+            model = self.table_map[table]
+            # Update column_map for table
+            self.get_columns_for_order_by(model._meta)
+        if table in self.column_map and col in self.column_map[table]:
+            field = self.column_map[table][col]
+        
+        return field
+
+    def has_offset_or_limit(self):
+        """Whether the query has a LIMIT or OFFSET defined."""
+        return self.query.low_mark != 0 or self.query.high_mark is not None
+
+    def get_ordering_fields(self):
+        compiler = self.compiler
+        
+        if self.query.extra_order_by:
+            ordering = self.query.extra_order_by
+        elif not self.query.default_ordering:
+            ordering = self.query.order_by
+        else:
+            ordering = self.query.order_by or self.query.model._meta.ordering
+        
+        select_aliases = compiler._select_aliases
+        all_columns = self.get_columns_for_order_by()
+        
+        # used to check whether we've already seen something
+        processed_pairs = set()
+        order_fields = tuple()
+        for field in ordering:
+            if field == '?':
+                # order_by('?') means order at random. Can't cache that obvs
+                raise StopCaching
+            if isinstance(field, int):
+                field = abs(field)
+                if field < len(all_columns):
+                    table, field_name = all_columns[field]
+                    if (table, field_name) not in processed_pairs:
+                        processed_pairs.add((table, field_name))
+                        order_fields += ((table, field_name),)
+                continue
+            col, order = models.sql.query.get_order_dir(field)
+            # This is something like a HAVING COUNT(*) > X, not relevant
+            if col in self.query.aggregate_select:
+                continue
+            if '.' in field:
+                # This came in through an extra(order_by=...) addition.
+                # order_by can't be parsed, so we can't cache
+                raise StopCaching
+            elif col not in self.query.extra_select:
+                # 'col' is of the form 'field' or 'field1__field2' or
+                # '-field1__field2__field', etc.
+                for table, col, _ in compiler.find_ordering_name(field, self.query.model._meta):
+                    field_name = self.map_column_to_field_name(table, col)
+                    if (table, field_name) not in processed_pairs:
+                        processed_pairs.add((table, field_name))
+                        order_fields += ((table, field_name),)
+            else:
+                # order_by is a column in an extra_select, no good, abort
+                raise StopCaching
+        
+        return order_fields
+            
+    def get_constraints(self):
+        """
+        Get the table/column constraints associated with the queryset's query.
+        
+        TODO: Look at join information.
+        """
+        constraints = collections.defaultdict(set)
+        stack = [self.query.where]
+        while stack:
+            curr_where = stack.pop()
+            for k, v in curr_where.__dict__.items():
+                if isinstance(v, (list, tuple)):
+                    for i, item in enumerate(v):
+                        if isinstance(item, models.sql.where.WhereNode):
+                            stack.append(item)
+                        elif isinstance(item, (tuple)):
+                            if len(item) > 0 and isinstance(item[0], models.sql.where.Constraint):
+                                constraint = item[0]
+                                model = constraint.field.model
+                                name = constraint.field.name
+                                if not hasattr(model, '_model_key'):
+                                    continue
+                                # If the primary key, don't add to list
+                                if model._meta.pk and model._meta.pk.name == name:
+                                    continue
+                                constraint_key = u'cols:%s' % model._model_key()
+                                if model._meta.db_table not in self.table_map:
+                                    self.table_map[model._meta.db_table] = model
+                                    constraints[constraint_key].add(name)
+        if self.has_offset_or_limit():
+            order_fields = self.get_ordering_fields()
+            for table, name in order_fields:
+                constraint_key = u'cols:m:%s' % table
+                constraints[constraint_key].add(name)
+        return constraints
+
 
 class CachingQuerySet(models.query.QuerySet):
     
@@ -207,27 +352,34 @@ class CachingQuerySet(models.query.QuerySet):
         iterator = super(CachingQuerySet, self).iterator
         if self.timeout == NO_CACHE or skip_cache:
             return iterator()
-        else:
-            try:
-                # Work-around for Django #12717.
-                query_string = self.query_string()
-            except models.sql.query.EmptyResultSet:
-                return iterator()
-            
-            if self.cache_machine is not None:
-                return iter(self.cache_machine)
-            
-            self.cache_machine = CacheMachine(self)
-            cached = cache.get(self.cache_machine.query_key(), default=-1)
-            # If the value is None, that means it has a lock on it after
-            # being cleared (if the key doesn't exist, we would get -1).
-            # We return the regular queryset iterator, which yields an
-            # uncached result set.
-            if cached is None:
-                return iterator()
-            else:
-                self.cache_machine.cached = cached
+        try:
+            # Work-around for Django #12717.
+            query_string = self.query_string()
+        except models.sql.query.EmptyResultSet:
+            return iterator()
+
+        if self.cache_machine is not None:
             return iter(self.cache_machine)
+
+        self.cache_machine = CacheMachine(self)
+        query_key = self.cache_machine.query_key()
+        cached = cache.get(query_key, default=-1)
+        # If the value is None, that means it has a lock on it after
+        # being cleared (if the key doesn't exist, we would get -1).
+        # We return the regular queryset iterator, which yields an
+        # uncached result set.
+        if cached is None:
+            return iterator()
+        else:
+            self.cache_machine.cached = cached
+        try:
+            return iter(self.cache_machine)
+        except StopCaching:
+            # Put a persistent lock on the query key (see above comment)
+            # to prevent it from going through the cache again
+            cache.set(query_key, None, timeout=0)
+            # Return the super iterator
+            return iterator
 
     def count(self):
         timeout = getattr(settings, 'CACHE_COUNT_TIMEOUT', None)
@@ -251,153 +403,6 @@ class CachingQuerySet(models.query.QuerySet):
         qs.timeout = self.timeout
         return qs
 
-    _cachemachine_column_map = {}
-    _cachemachine_table_map = {}
-    _cachemachine_compiler = None
-
-    @property
-    def cachemachine_compiler(self):
-        if self._cachemachine_compiler is None:
-            compiler = self.query.get_compiler(using=self.db)
-            compiler.pre_sql_setup()
-            compiler.get_columns()
-            self._cachemachine_compiler = compiler
-        return self._cachemachine_compiler
-
-    def get_columns_for_order_by(self, opts=None):
-        columns = tuple()
-        column_map = self._cachemachine_column_map
-        if opts is None:
-            opts = self.query.model._meta
-        if opts.db_table not in column_map:
-            column_map[opts.db_table] = {}
-        only_load = self.cachemachine_compiler.deferred_to_columns()
-        for field, model in opts.get_fields_with_model():
-            alias = self.query.included_inherited_models[model]
-            table = self.query.alias_map[alias][models.sql.constants.TABLE_NAME]
-            if table in only_load and field.column not in only_load[table]:
-                continue
-            columns += ((table, field.name),)
-            column_map[opts.db_table][field.column] = field.name
-        return columns, column_map
-
-    def map_column_to_field_name(self, table, col):
-        table_map = self._cachemachine_table_map
-        column_map = self._cachemachine_column_map
-        
-        if len(table_map.keys()) == 0:
-            self.get_constraints()
-        
-        field = col
-        
-        if table in table_map and table not in column_map:
-            model = table_map[table]
-            _, table_col_map = self.get_columns_for_order_by(model._meta)
-            column_map.update(table_col_map)
-        if table in column_map and col in column_map[table]:
-            field = column_map[table][col]
-        
-        return field
-
-    def has_offset_or_limit(self):
-        """Whether the query has a LIMIT or OFFSET defined."""
-        return self.query.low_mark != 0 or self.query.high_mark is not None
-
-    def get_ordering_fields(self):
-        table_map = self._cachemachine_table_map
-                
-        compiler = self.cachemachine_compiler
-        
-        if self.query.extra_order_by:
-            ordering = self.query.extra_order_by
-        elif not self.query.default_ordering:
-            ordering = self.query.order_by
-        else:
-            ordering = self.query.order_by or self.query.model._meta.ordering
-        
-        select_aliases = compiler._select_aliases
-        all_columns, column_map = self.get_columns_for_order_by()
-        
-        # used to check whether we've already seen something
-        processed_pairs = set()
-        order_fields = tuple()
-        # TODO: Work out how to detect ORDER BYs passed as parameters, e.g.
-        # "ORDER BY ? DESC"
-        for field in ordering:
-            if field == '?':
-                continue
-            if isinstance(field, int):
-                field = abs(field)
-                if field < len(all_columns):
-                    table, field_name = all_columns[field]
-                    if (table, field_name) not in processed_pairs:
-                        processed_pairs.add((table, field_name))
-                        order_fields += ((table, field_name),)
-                continue
-            col, order = models.sql.query.get_order_dir(field)
-            # This is something like a HAVING COUNT(*) > X, not relevant
-            if col in self.query.aggregate_select:
-                continue
-            if '.' in field:
-                # This came in through an extra(order_by=...) addition. Pass it
-                # on verbatim.
-                table, col = col.split('.', 1)
-                field_name = self.map_column_to_field_name(table, col)
-                if (table, field_name) not in processed_pairs:
-                    processed_pairs.add((table, field_name))
-                    order_fields += ((table, field_name),)
-            elif col not in self.query.extra_select:
-                # 'col' is of the form 'field' or 'field1__field2' or
-                # '-field1__field2__field', etc.
-                for table, col, _ in compiler.find_ordering_name(field, self.query.model._meta):
-                    field_name = self.map_column_to_field_name(table, col)
-                    if (table, field_name) not in processed_pairs:
-                        processed_pairs.add((table, field_name))
-                        order_fields += ((table, field_name),)
-            else:
-                # TODO: Work out what to do when the order by is based on a
-                # field in an extra_select... prevent caching?
-                pass
-        
-        return order_fields
-            
-    def get_constraints(self):
-        """
-        Get the table/column constraints associated with the queryset's query.
-        
-        TODO: Look at join information.
-        """
-        constraints = collections.defaultdict(set)
-        table_map = self._cachemachine_table_map
-        stack = [self.query.where]
-        while stack:
-            curr_where = stack.pop()
-            for k, v in curr_where.__dict__.items():
-                if isinstance(v, (list, tuple)):
-                    for i, item in enumerate(v):
-                        if isinstance(item, models.sql.where.WhereNode):
-                            stack.append(item)
-                        elif isinstance(item, (tuple)):
-                            if len(item) > 0 and isinstance(item[0], models.sql.where.Constraint):
-                                constraint = item[0]
-                                model = constraint.field.model
-                                name = constraint.field.name
-                                if not hasattr(model, '_model_key'):
-                                    continue
-                                # If the primary key, don't add to list
-                                if model._meta.pk and model._meta.pk.name == name:
-                                    continue
-                                constraint_key = u'cols:%s' % model._model_key()
-                                if model._meta.db_table not in table_map:
-                                    table_map[model._meta.db_table] = model
-                                if name not in constraints[constraint_key]:
-                                    constraints[constraint_key].add(name)
-        if self.has_offset_or_limit():
-            order_fields = self.get_ordering_fields()
-            for table, name in order_fields:
-                constraint_key = u'cols:m:%s' % table
-                constraints[constraint_key].add(name)
-        return constraints
 
 class CachingMixin:
     """Inherit from this class to get caching and invalidation helpers."""
