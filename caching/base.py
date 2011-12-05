@@ -380,15 +380,6 @@ class CachingQuerySet(models.query.QuerySet):
             self.cache_machine.cached = cached
         return iter(self.cache_machine)
 
-    def count(self):
-        timeout = getattr(settings, 'CACHE_COUNT_TIMEOUT', None)
-        super_count = super(CachingQuerySet, self).count
-        count_key = 'count:%s' % self.query_string()
-        if timeout is None:
-            return super_count()
-        else:
-            return cached_with(self, super_count, count_key, timeout)
-
     def cache(self, timeout=None):
         qs = self._clone()
         qs.timeout = timeout
