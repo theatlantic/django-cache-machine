@@ -162,7 +162,10 @@ class CacheMachine(object):
         # If anything has been passed to the queryset via extra, we can't
         # ensure that the proper fields will be associated, so we don't cache
         if len(self.query.extra) > 0:
-            raise StopCaching
+            # Put a persistent lock on the query key to prevent it from going
+            # through the cache again
+            cache.set(query_key, None, timeout=0)
+            self.cached = None
 
         if self.cached is not None and not isinstance(self.cached, int):
             if CACHE_DEBUG:
@@ -191,12 +194,18 @@ class CacheMachine(object):
         """Cache query_key => objects, then update the flush lists."""
         query_key = self.query_key()
         query_flush = flush_key(self.query_string)
-        cache.add(query_key, objects, timeout=self.timeout)
-        constraints = self.get_constraints()
-        model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
-        model_flush_keys.add(flush_key(self.queryset.model._model_key()))
-        invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
-        invalidator.add_to_flush_list(constraints, watch_key=query_flush)
+        try:
+            constraints = self.get_constraints()
+        except StopCaching:
+            # Put a persistent lock on the query key to prevent it from going
+            # through the cache again
+            cache.set(query_key, None, timeout=0)
+        else:
+            cache.add(query_key, objects, timeout=self.timeout)
+            model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
+            model_flush_keys.add(flush_key(self.queryset.model._model_key()))
+            invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
+            invalidator.add_to_flush_list(constraints, watch_key=query_flush)
 
     column_map = {}
     table_map = {}
@@ -369,14 +378,7 @@ class CachingQuerySet(models.query.QuerySet):
             return iterator()
         else:
             self.cache_machine.cached = cached
-        try:
-            return iter(self.cache_machine)
-        except StopCaching:
-            # Put a persistent lock on the query key (see above comment)
-            # to prevent it from going through the cache again
-            cache.set(query_key, None, timeout=0)
-            # Return the super iterator
-            return iterator
+        return iter(self.cache_machine)
 
     def count(self):
         timeout = getattr(settings, 'CACHE_COUNT_TIMEOUT', None)
