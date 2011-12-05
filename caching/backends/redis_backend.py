@@ -203,6 +203,7 @@ class CacheClass(BaseCache):
             try:
                 if watch_key is not None:
                     pipe.watch(watch_key)
+                pipe.multi()
                 for key, value in data.iteritems():
                     key = self.make_key(key, version=version)
                     self._cache.setex(key, pickle.dumps(value), timeout)

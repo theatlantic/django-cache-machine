@@ -186,6 +186,7 @@ class RedisInvalidator(Invalidator):
             try:
                 if watch_key is not None:
                     pipe.watch(watch_key)
+                pipe.multi()
                 for key, list_ in mapping.items():
                     for query_key in list_:
                         pipe.sadd(self.safe_key(key), query_key)
