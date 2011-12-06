@@ -11,6 +11,13 @@ from django.utils import encoding
 from .invalidation import invalidator, flush_key, make_key
 
 from datetime import timedelta
+
+try:
+    from redis.exceptions import ConnectionError
+except ImportError:
+    class ConnectionError(Exception):
+        pass
+
 second_delta = timedelta(seconds=1)
 
 class NullHandler(logging.Handler):
@@ -367,7 +374,10 @@ class CachingQuerySet(models.query.QuerySet):
 
         self.cache_machine = CacheMachine(self)
         query_key = self.cache_machine.query_key()
-        cached = cache.get(query_key, default=-1)
+        try:
+            cached = cache.get(query_key, default=-1)
+        except ConnectionError:
+            cached = None
         # If the value is None, that means it has a lock on it after
         # being cleared (if the key doesn't exist, we would get -1).
         # We return the regular queryset iterator, which yields an
