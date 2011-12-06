@@ -218,10 +218,8 @@ class CacheClass(BaseCache):
         """
         Disconnect from the cache.
         """
-        if hasattr(self._cache, 'connection'):
-            self._cache.connection.disconnect()
-        elif hasattr(self._cache, 'connection_pool'):
-            self._cache.connection_pool.disconnect()
+        if hasattr(self._cache, 'reset'):
+            self._cache.reset()
 
     @property
     def redis(self):
