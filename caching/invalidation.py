@@ -10,17 +10,14 @@ from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.utils import encoding, translation
 import caching.backends.redis_backend
+from .settings import CACHE_PREFIX, NO_INVALIDATION, CACHE_DEBUG
 
 try:
     import redis as redislib
 except ImportError:
     redislib = None
 
-
-CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
-FETCH_BY_ID = getattr(settings, 'FETCH_BY_ID', False)
 FLUSH = CACHE_PREFIX + ':flush:'
-CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
 
 class NullHandler(logging.Handler):
 
@@ -55,11 +52,6 @@ def flush_key(obj):
     """We put flush lists in the flush: namespace."""
     key = obj if isinstance(obj, basestring) else obj.cache_key
     return FLUSH + make_key(key, with_locale=False)
-
-
-def byid(obj):
-    key = obj if isinstance(obj, basestring) else obj._cache_key(obj.pk)
-    return make_key('byid:' + key)
 
 
 def safe_redis(return_type):
@@ -118,17 +110,22 @@ class Invalidator(object):
                         for k in assoc_flush_keys:
                             sql = self.get_query_string(k)
                             debug_log.debug("Flushing flush_key %s" % sql)
-            cache.set_many(dict((k, None) for k in flush), 5)
+            if hasattr(cache, 'set_many_ex'):
+                cache.set_many_ex(dict((k, None) for k in flush), 5)
+            else:
+                cache.set_many(dict((k, None) for k in flush), 5)
         if flush_keys:
             self.clear_flush_lists(flush_keys)
 
-    def cache_objects(self, objects, query_key, query_flush):
+    def cache_objects(self, objects, query_key, query_flush, model_flush_keys=None):
         # Add this query to the flush list of each object.  We include
         # query_flush so that other things can be cached against the queryset
         # and still participate in invalidation.
         flush_keys = list(chain.from_iterable(
             [[o.flush_key(), o.model_flush_key()] for o in objects]
         ))
+        if model_flush_keys is not None:
+            flush_keys.extend(list(model_flush_keys))
 
         flush_lists = collections.defaultdict(set)
         for key in flush_keys:
@@ -141,9 +138,7 @@ class Invalidator(object):
             for key in map(flush_key, obj._cache_keys()):
                 if key != obj_flush:
                     flush_lists[key].add(obj_flush)
-                if FETCH_BY_ID:
-                    flush_lists[key].add(byid(obj))
-        self.add_to_flush_list(flush_lists)
+        self.add_to_flush_list(flush_lists, watch_key=query_flush)
 
     def find_flush_lists(self, keys):
         """
@@ -171,7 +166,7 @@ class Invalidator(object):
             else:
                 return flush, keys
 
-    def add_to_flush_list(self, mapping):
+    def add_to_flush_list(self, mapping, **kwargs):
         """Update flush lists with the {flush_key: [query_key,...]} map."""
         flush_lists = collections.defaultdict(set)
         flush_lists.update(cache.get_many(mapping.keys()))
@@ -205,15 +200,26 @@ class RedisInvalidator(Invalidator):
         return key
 
     @safe_redis(None)
-    def add_to_flush_list(self, mapping):
+    def add_to_flush_list(self, mapping, watch_key=None):
         """Update flush lists with the {flush_key: [query_key,...]} map."""
-        for key, list_ in mapping.items():
-            for query_key in list_:
-                try:
-                    redis.sadd(self.safe_key(key), query_key)
-                except redislib.RedisError:
-                    pass
-
+        if not mapping or not len(mapping):
+            return
+        pipe = redis.pipeline()
+        while 1:
+            try:
+                if watch_key is not None:
+                    pipe.watch(watch_key)
+                pipe.multi()
+                for key, list_ in mapping.items():
+                    for query_key in list_:
+                        pipe.sadd(self.safe_key(key), query_key)
+                pipe.execute()
+                break
+            except redislib.WatchError:
+                continue
+            finally:
+                pipe.reset()
+    
     @safe_redis(set)
     def get_flush_lists(self, keys):
         return redis.sunion(map(self.safe_key, keys))
@@ -229,11 +235,11 @@ class RedisInvalidator(Invalidator):
 
 class NullInvalidator(Invalidator):
 
-    def add_to_flush_list(self, mapping):
+    def add_to_flush_list(self, mapping, **kwargs):
         return
 
 
-if getattr(settings, 'CACHE_MACHINE_NO_INVALIDATION', False):
+if NO_INVALIDATION:
     invalidator = NullInvalidator()
 elif isinstance(cache, caching.backends.redis_backend.CacheClass):
     redis = cache.redis

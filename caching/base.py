@@ -1,3 +1,4 @@
+import collections
 import functools
 import logging
 
@@ -5,13 +6,19 @@ from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.db import models
 from django.db.models import signals
-from django.db.models.sql import query
-from django.db.models.sql.where import WhereNode, Constraint
 from django.utils import encoding
 
-from .invalidation import invalidator, flush_key, make_key, byid
+from .settings import CACHE_DEBUG, CACHE_PREFIX
+from .invalidation import invalidator, flush_key, make_key
 
 from datetime import timedelta
+
+try:
+    from redis.exceptions import ConnectionError
+except ImportError:
+    class ConnectionError(Exception):
+        pass
+
 second_delta = timedelta(seconds=1)
 
 class NullHandler(logging.Handler):
@@ -25,9 +32,11 @@ log.addHandler(NullHandler())
 
 FOREVER = 0
 NO_CACHE = -1
-CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
-FETCH_BY_ID = getattr(settings, 'FETCH_BY_ID', False)
-CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
+
+
+class StopCaching(Exception):
+    """Raised when a query is determined to be uncacheable"""
+    pass
 
 class CachingManager(models.Manager):
 
@@ -41,7 +50,6 @@ class CachingManager(models.Manager):
         signals.pre_save.connect(self.pre_save, sender=cls)
         signals.post_save.connect(self.post_save, sender=cls)
         signals.post_delete.connect(self.post_delete, sender=cls)
-        signals.m2m_changed.connect(self.m2m_changed)
         return super(CachingManager, self).contribute_to_class(cls, name)
 
     def pre_save(self, sender, instance, raw, **kwargs):
@@ -79,13 +87,14 @@ class CachingManager(models.Manager):
             if not hasattr(orig, col) or not hasattr(instance, col):
                 continue
             if getattr(orig, col) != getattr(instance, col):
-                cls.objects.invalidate_model()
+                instance.invalidate_model = True
                 return
 
     def post_save(self, instance, created, **kwargs):
-        self.invalidate(instance)
-        if created:
-            invalidator.clear()
+        if instance.invalidate_model or created:
+            self.invalidate_model()
+        else:
+            self.invalidate(instance)
         
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
@@ -120,14 +129,7 @@ class CachingManager(models.Manager):
             ) % ".".join([self.model.__module__, self.model.__name__]))
         invalidator.invalidate_keys([model_key])
         # Set cols to none for 5 seconds before expiring (prevents race condition)
-        cache.set(u'cols:%s' % model_key, None, 5)
-
-    # Caching raw querysets seems too dangerous, especially since we
-    # can't inspect constraints; disabling
-    #
-    # def raw(self, raw_query, params=None, *args, **kwargs):
-    #     return CachingRawQuerySet(raw_query, self.model, params=params,
-    #                               using=self._db, *args, **kwargs)
+        cache.delete(u'cols:%s' % model_key)
 
     def cache(self, timeout=None):
         return self.get_query_set().cache(timeout)
@@ -144,11 +146,12 @@ class CacheMachine(object):
     called to get an iterator over some database results.
     """
 
-    def __init__(self, query_string, iter_function, queryset, cached=None):
-        self.query_string = query_string
-        self.iter_function = iter_function
+    def __init__(self, queryset, cached=None):
+        self.query_string = queryset.query_string()
+        self.iter_function = queryset.iterator(skip_cache=True)
         self.timeout = getattr(queryset, 'timeout', None)
         self.queryset = queryset
+        self.query = self.queryset.query
         self.cached = cached
 
     def query_key(self):
@@ -163,6 +166,14 @@ class CacheMachine(object):
         except query.EmptyResultSet:
             raise StopIteration
 
+        # If anything has been passed to the queryset via extra, we can't
+        # ensure that the proper fields will be associated, so we don't cache
+        if len(self.query.extra) > 0:
+            # Put a persistent lock on the query key to prevent it from going
+            # through the cache again
+            cache.set(query_key, None, timeout=0)
+            self.cached = None
+
         if self.cached is not None and not isinstance(self.cached, int):
             if CACHE_DEBUG:
                 log.debug('cache hit: %s' % self.query_string)
@@ -171,7 +182,7 @@ class CacheMachine(object):
                 yield obj
             return
 
-        iterator = self.iter_function()
+        iterator = self.iter_function
 
         # Do the database query, cache it once we have all the objects.
         to_cache = []
@@ -190,28 +201,131 @@ class CacheMachine(object):
         """Cache query_key => objects, then update the flush lists."""
         query_key = self.query_key()
         query_flush = flush_key(self.query_string)
-        cache.add(query_key, objects, timeout=self.timeout)
-        invalidator.cache_objects(objects, query_key, query_flush)
-        constraints = self.get_constraints()
-        invalidator.add_to_flush_list(constraints)
+        try:
+            constraints = self.get_constraints()
+        except StopCaching:
+            # Put a persistent lock on the query key to prevent it from going
+            # through the cache again
+            cache.set(query_key, None, timeout=0)
+        else:
+            cache.add(query_key, objects, timeout=self.timeout)
+            model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
+            model_flush_keys.add(flush_key(self.queryset.model._model_key()))
+            invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
+            invalidator.add_to_flush_list(constraints, watch_key=query_flush)
 
+    column_map = {}
+    table_map = {}
+    _compiler = None
+
+    @property
+    def compiler(self):
+        if self._compiler is None:
+            compiler = self.query.get_compiler(using=self.queryset.db)
+            compiler.pre_sql_setup()
+            compiler.get_columns()
+            self._compiler = compiler
+        return self._compiler
+
+    def get_columns_for_order_by(self, opts=None):
+        columns = tuple()
+        if opts is None:
+            opts = self.query.model._meta
+        if opts.db_table not in self.column_map:
+            self.column_map[opts.db_table] = {}
+        only_load = self.compiler.deferred_to_columns()
+        for field, model in opts.get_fields_with_model():
+            alias = self.query.included_inherited_models[model]
+            table = self.query.alias_map[alias][models.sql.constants.TABLE_NAME]
+            if table in only_load and field.column not in only_load[table]:
+                continue
+            columns += ((table, field.name),)
+            self.column_map[opts.db_table][field.column] = field.name
+        return columns
+
+    def map_column_to_field_name(self, table, col):
+        field = col
+        
+        if table in self.table_map and table not in self.column_map:
+            model = self.table_map[table]
+            # Update column_map for table
+            self.get_columns_for_order_by(model._meta)
+        if table in self.column_map and col in self.column_map[table]:
+            field = self.column_map[table][col]
+        
+        return field
+
+    def has_offset_or_limit(self):
+        """Whether the query has a LIMIT or OFFSET defined."""
+        return self.query.low_mark != 0 or self.query.high_mark is not None
+
+    def get_ordering_fields(self):
+        compiler = self.compiler
+        
+        if self.query.extra_order_by:
+            ordering = self.query.extra_order_by
+        elif not self.query.default_ordering:
+            ordering = self.query.order_by
+        else:
+            ordering = self.query.order_by or self.query.model._meta.ordering
+        
+        select_aliases = compiler._select_aliases
+        all_columns = self.get_columns_for_order_by()
+        
+        # used to check whether we've already seen something
+        processed_pairs = set()
+        order_fields = tuple()
+        for field in ordering:
+            if field == '?':
+                # order_by('?') means order at random. Can't cache that obvs
+                raise StopCaching
+            if isinstance(field, int):
+                field = abs(field)
+                if field < len(all_columns):
+                    table, field_name = all_columns[field]
+                    if (table, field_name) not in processed_pairs:
+                        processed_pairs.add((table, field_name))
+                        order_fields += ((table, field_name),)
+                continue
+            col, order = models.sql.query.get_order_dir(field)
+            # This is something like a HAVING COUNT(*) > X, not relevant
+            if col in self.query.aggregate_select:
+                continue
+            if '.' in field:
+                # This came in through an extra(order_by=...) addition.
+                # order_by can't be parsed, so we can't cache
+                raise StopCaching
+            elif col not in self.query.extra_select:
+                # 'col' is of the form 'field' or 'field1__field2' or
+                # '-field1__field2__field', etc.
+                for table, col, _ in compiler.find_ordering_name(field, self.query.model._meta):
+                    field_name = self.map_column_to_field_name(table, col)
+                    if (table, field_name) not in processed_pairs:
+                        processed_pairs.add((table, field_name))
+                        order_fields += ((table, field_name),)
+            else:
+                # order_by is a column in an extra_select, no good, abort
+                raise StopCaching
+        
+        return order_fields
+            
     def get_constraints(self):
         """
         Get the table/column constraints associated with the queryset's query.
         
         TODO: Look at join information.
         """
-        constraints = {}
-        stack = [self.queryset.query.where]
+        constraints = collections.defaultdict(set)
+        stack = [self.query.where]
         while stack:
             curr_where = stack.pop()
             for k, v in curr_where.__dict__.items():
                 if isinstance(v, (list, tuple)):
                     for i, item in enumerate(v):
-                        if isinstance(item, WhereNode):
+                        if isinstance(item, models.sql.where.WhereNode):
                             stack.append(item)
                         elif isinstance(item, (tuple)):
-                            if len(item) > 0 and isinstance(item[0], Constraint):
+                            if len(item) > 0 and isinstance(item[0], models.sql.where.Constraint):
                                 constraint = item[0]
                                 model = constraint.field.model
                                 name = constraint.field.name
@@ -221,101 +335,60 @@ class CacheMachine(object):
                                 if model._meta.pk and model._meta.pk.name == name:
                                     continue
                                 constraint_key = u'cols:%s' % model._model_key()
-                                if constraint_key not in constraints:
-                                    constraints[constraint_key] = set()
-                                if name not in constraints[constraint_key]:
-                                    constraints[constraint_key].add(name)
+                                if model._meta.db_table not in self.table_map:
+                                    self.table_map[model._meta.db_table] = model
+                                constraints[constraint_key].add(name)
+        if self.has_offset_or_limit():
+            order_fields = self.get_ordering_fields()
+            for table, name in order_fields:
+                constraint_key = u'cols:m:%s' % table
+                constraints[constraint_key].add(name)
         return constraints
+    
 
 class CachingQuerySet(models.query.QuerySet):
+    
+    cache_machine = None
 
     def __init__(self, *args, **kw):
         super(CachingQuerySet, self).__init__(*args, **kw)
         self.timeout = None
 
     def flush_key(self):
-        return flush_key(self.query_key())
+        return flush_key(self.query_string())
 
-    def query_key(self):
+    def query_string(self):
         sql, params = self.query.get_compiler(using=self.db).as_sql()
         return sql % params
 
-    def iterator(self):
+    def iterator(self, skip_cache=False):
         iterator = super(CachingQuerySet, self).iterator
-        if self.timeout == NO_CACHE:
-            return iter(iterator())
+        if self.timeout == NO_CACHE or skip_cache:
+            return iterator()
+        try:
+            # Work-around for Django #12717.
+            query_string = self.query_string()
+        except models.sql.query.EmptyResultSet:
+            return iterator()
+
+        if self.cache_machine is not None:
+            return iter(self.cache_machine)
+
+        self.cache_machine = CacheMachine(self)
+        query_key = self.cache_machine.query_key()
+        try:
+            cached = cache.get(query_key, default=-1)
+        except ConnectionError:
+            cached = None
+        # If the value is None, that means it has a lock on it after
+        # being cleared (if the key doesn't exist, we would get -1).
+        # We return the regular queryset iterator, which yields an
+        # uncached result set.
+        if cached is None:
+            return iterator()
         else:
-            try:
-                # Work-around for Django #12717.
-                query_string = self.query_key()
-            except query.EmptyResultSet:
-                return iterator()
-            machine = CacheMachine(query_string, iterator, queryset=self)
-            cached = cache.get(machine.query_key(), default=-1)
-            # If the value is None, that means it has a lock on it after
-            # being cleared (if the key doesn't exist, we would get -1).
-            # We return the regular queryset iterator, which yields an
-            # uncached result set.
-            if cached is None:
-                return iter(iterator())
-            else:
-                machine.cached = cached
-            if FETCH_BY_ID:
-                machine.iterator = self.fetch_by_id
-            return iter(machine)
-
-    def fetch_by_id(self):
-        """
-        Run two queries to get objects: one for the ids, one for id__in=ids.
-
-        After getting ids from the first query we can try cache.get_many to
-        reuse objects we've already seen.  Then we fetch the remaining items
-        from the db, and put those in the cache.  This prevents cache
-        duplication.
-        """
-        # Include columns from extra since they could be used in the query's
-        # order_by.
-        vals = self.values_list('pk', *self.query.extra.keys())
-        pks = [val[0] for val in vals]
-        keys = dict((byid(self.model._cache_key(pk)), pk) for pk in pks)
-        cached = dict((k, v) for k, v in cache.get_many(keys).items()
-                      if v is not None)
-
-        # Pick up the objects we missed.
-        missed = [pk for key, pk in keys.items() if key not in cached]
-        if missed:
-            others = self.fetch_missed(missed)
-            # Put the fetched objects back in cache.
-            new = dict((byid(o), o) for o in others)
-            cache.set_many(new)
-        else:
-            new = {}
-
-        # Use pks to return the objects in the correct order.
-        objects = dict((o.pk, o) for o in cached.values() + new.values())
-        for pk in pks:
-            yield objects[pk]
-
-    def fetch_missed(self, pks):
-        # Reuse the queryset but get a clean query.
-        others = self.all()
-        others.query.clear_limits()
-        # Clear out the default ordering since we order based on the query.
-        others = others.order_by().filter(pk__in=pks)
-        if hasattr(others, 'no_cache'):
-            others = others.no_cache()
-        if self.query.select_related:
-            others.dup_select_related(self)
-        return others
-
-    def count(self):
-        timeout = getattr(settings, 'CACHE_COUNT_TIMEOUT', None)
-        super_count = super(CachingQuerySet, self).count
-        query_string = 'count:%s' % self.query_key()
-        if timeout is None:
-            return super_count()
-        else:
-            return cached_with(self, super_count, query_string, timeout)
+            self.cache_machine.cached = cached
+        return iter(self.cache_machine)
 
     def cache(self, timeout=None):
         qs = self._clone()
@@ -333,7 +406,10 @@ class CachingQuerySet(models.query.QuerySet):
 
 class CachingMixin:
     """Inherit from this class to get caching and invalidation helpers."""
-
+    
+    """Whether to invalidate the model in the post_save. Set in the pre_save"""
+    invalidate_model = False
+    
     def flush_key(self):
         return flush_key(self)
 
@@ -368,7 +444,7 @@ class CachingMixin:
         
         For the Addon class, we get "m:addons.addon".
         """
-        key_parts = ('m', cls._meta)
+        key_parts = ('m', cls._meta.db_table)
         return ':'.join(map(encoding.smart_unicode, key_parts))
 
     def _model_keys(self):
@@ -387,16 +463,6 @@ class CachingMixin:
         return (self.cache_key,) + tuple(keys)
 
 
-class CachingRawQuerySet(models.query.RawQuerySet):
-
-    def __iter__(self):
-        iterator = super(CachingRawQuerySet, self).__iter__
-        sql = self.raw_query % tuple(self.params)
-        for obj in CacheMachine(sql, iterator, queryset=self):
-            yield obj
-        raise StopIteration
-
-
 def _function_cache_key(key):
     return make_key('f:%s' % key, with_locale=True)
 
@@ -409,7 +475,7 @@ def cached(function, key_, duration=None):
         if CACHE_DEBUG:
             log.debug('cache miss for %s' % key)
         val = function()
-        cache.set(key, val, duration)
+        cache.setex(key, val, duration)
     elif CACHE_DEBUG:
         log.debug('cache hit for %s' % key)
     return val
@@ -430,7 +496,7 @@ def cached_with(obj, f, f_key, timeout=None):
     invalidator.add_to_flush_list({
         obj.flush_key(): [func_cache_key],
         obj.model_flush_key(): [func_cache_key],
-    })
+    }, watch_key=obj.flush_key())
     return cached(f, key, timeout)
 
 

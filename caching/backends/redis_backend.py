@@ -81,7 +81,7 @@ class CacheClass(BaseCache):
         key = self.make_key(key, version=version)
         if self._cache.exists(key):
             return False
-        return self.set(key, value, timeout)
+        return self.setex(key, value, timeout)
 
     def get(self, key, default=None, version=None):
         """
@@ -106,6 +106,15 @@ class CacheClass(BaseCache):
         self.expire(key, timeout, version=version)
         # result is a boolean
         return result
+
+    def setex(self, key, value, timeout=None, version=None):
+        """
+        Persist a value to the cache, and set an expiration time.
+        """
+        key = self.make_key(key, version=version)
+        if timeout is None:
+            timeout = self.default_timeout
+        return self._cache.setex(key, pickle.dumps(value), timeout)
 
     def expire(self, key, timeout=None, version=None):
         """
@@ -186,14 +195,31 @@ class CacheClass(BaseCache):
                                    for key, value in safe_data.iteritems()))
             map(self.expire, safe_data, [timeout]*len(safe_data))
 
+    def set_many_ex(self, data, timeout=None, version=None, watch_key=None):
+        if timeout is None:
+            timeout = self.default_timeout
+        pipe = self._cache.pipeline()
+        while 1:
+            try:
+                if watch_key is not None:
+                    pipe.watch(watch_key)
+                pipe.multi()
+                for key, value in data.iteritems():
+                    key = self.make_key(key, version=version)
+                    self._cache.setex(key, pickle.dumps(value), timeout)
+                pipe.execute()
+                break
+            except WatchError:
+                continue
+            finally:
+                pipe.reset()
+
     def close(self, **kwargs):
         """
         Disconnect from the cache.
         """
-        if hasattr(self._cache, 'connection'):
-            self._cache.connection.disconnect()
-        elif hasattr(self._cache, 'connection_pool'):
-            self._cache.connection_pool.disconnect()
+        if hasattr(self._cache, 'reset'):
+            self._cache.reset()
 
     @property
     def redis(self):
