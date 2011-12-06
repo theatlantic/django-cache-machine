@@ -84,12 +84,10 @@ class CachingManager(models.Manager):
                 return
 
     def post_save(self, instance, created, **kwargs):
-        if instance.invalidate_model:
+        if instance.invalidate_model or created:
             self.invalidate_model()
         else:
             self.invalidate(instance)
-        if created:
-            invalidator.clear()
         
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)

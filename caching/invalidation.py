@@ -110,9 +110,6 @@ class Invalidator(object):
         for obj in objects:
             obj_flush = obj.flush_key()
             for key in map(flush_key, obj._cache_keys()):
-                if model_flush_keys is not None:
-                    for model_flush_key in model_flush_keys:
-                        flush_lists[model_flush_key].add(obj_flush)
                 if key != obj_flush:
                     flush_lists[key].add(obj_flush)
         self.add_to_flush_list(flush_lists, watch_key=query_flush)
