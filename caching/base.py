@@ -8,6 +8,7 @@ from django.db import models
 from django.db.models import signals
 from django.utils import encoding
 
+from .settings import CACHE_DEBUG, CACHE_PREFIX
 from .invalidation import invalidator, flush_key, make_key
 
 from datetime import timedelta
@@ -31,8 +32,7 @@ log.addHandler(NullHandler())
 
 FOREVER = 0
 NO_CACHE = -1
-CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
-CACHE_DEBUG = getattr(settings, 'CACHE_DEBUG', False)
+
 
 class StopCaching(Exception):
     """Raised when a query is determined to be uncacheable"""

@@ -10,14 +10,13 @@ from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.utils import encoding, translation
 import caching.backends.redis_backend
+from .settings import CACHE_PREFIX, NO_INVALIDATION
 
 try:
     import redis as redislib
 except ImportError:
     redislib = None
 
-
-CACHE_PREFIX = getattr(settings, 'CACHE_PREFIX', '')
 FLUSH = CACHE_PREFIX + ':flush:'
 
 log = logging.getLogger('caching.invalidation')
@@ -213,7 +212,7 @@ class NullInvalidator(Invalidator):
         return
 
 
-if getattr(settings, 'CACHE_MACHINE_NO_INVALIDATION', False):
+if NO_INVALIDATION:
     invalidator = NullInvalidator()
 elif isinstance(cache, caching.backends.redis_backend.CacheClass):
     redis = cache.redis
