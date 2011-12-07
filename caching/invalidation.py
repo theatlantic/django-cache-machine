@@ -121,9 +121,7 @@ class Invalidator(object):
         # Add this query to the flush list of each object.  We include
         # query_flush so that other things can be cached against the queryset
         # and still participate in invalidation.
-        flush_keys = list(chain.from_iterable(
-            [[o.flush_key(), o.model_flush_key()] for o in objects]
-        ))
+        flush_keys = [o.flush_key() for o in objects]
         if model_flush_keys is not None:
             flush_keys.extend(list(model_flush_keys))
 

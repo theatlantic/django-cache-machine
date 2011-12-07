@@ -93,9 +93,8 @@ class CachingManager(models.Manager):
     def post_save(self, instance, created, **kwargs):
         if instance.invalidate_model or created:
             self.invalidate_model()
-        else:
-            self.invalidate(instance)
-        
+        self.invalidate(instance)
+    
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
     
@@ -202,17 +201,19 @@ class CacheMachine(object):
         query_key = self.query_key()
         query_flush = flush_key(self.query_string)
         try:
-            constraints = self.get_constraints()
+            constraints, extra_flush_keys = self.get_constraints()
         except StopCaching:
             # Put a persistent lock on the query key to prevent it from going
             # through the cache again
             cache.set(query_key, None, timeout=0)
         else:
             cache.add(query_key, objects, timeout=self.timeout)
-            model_flush_keys = set([flush_key(k[5:]) for k in constraints.keys()])
-            model_flush_keys.add(flush_key(self.queryset.model._model_key()))
+            model_flush_keys = set([flush_key(k) for k in extra_flush_keys])
+            if len(constraints):
+                model_flush_keys.update([flush_key(k[5:]) for k in constraints.keys()])
             invalidator.cache_objects(objects, query_key, query_flush, model_flush_keys)
-            invalidator.add_to_flush_list(constraints, watch_key=query_flush)
+            if len(constraints):
+                invalidator.add_to_flush_list(constraints, watch_key=query_flush)
 
     column_map = {}
     table_map = {}
@@ -316,6 +317,7 @@ class CacheMachine(object):
         TODO: Look at join information.
         """
         constraints = collections.defaultdict(set)
+        extra_flush_keys = set([])
         stack = [self.query.where]
         while stack:
             curr_where = stack.pop()
@@ -326,13 +328,20 @@ class CacheMachine(object):
                             stack.append(item)
                         elif isinstance(item, (tuple)):
                             if len(item) > 0 and isinstance(item[0], models.sql.where.Constraint):
-                                constraint = item[0]
+                                constraint, lookup_type, value_annot, params_or_value = item
                                 model = constraint.field.model
                                 name = constraint.field.name
                                 if not hasattr(model, '_model_key'):
                                     continue
-                                # If the primary key, don't add to list
                                 if model._meta.pk and model._meta.pk.name == name:
+                                    # If the constraint is of the form "id IN (...)"
+                                    # or "id=###" then get the cache key of the object
+                                    # with that id and add it to extra_flush_keys
+                                    if lookup_type == 'exact' and isinstance(params_or_value, int):
+                                        extra_flush_keys.add(model._cache_key(params_or_value))
+                                    elif lookup_type == 'in' and isinstance(params_or_value, list):
+                                        extra_flush_keys.update(map(model._cache_key, params_or_value))
+                                    # Don't add primary keys to the constraints list
                                     continue
                                 constraint_key = u'cols:%s' % model._model_key()
                                 if model._meta.db_table not in self.table_map:
@@ -343,7 +352,7 @@ class CacheMachine(object):
             for table, name in order_fields:
                 constraint_key = u'cols:m:%s' % table
                 constraints[constraint_key].add(name)
-        return constraints
+        return constraints, extra_flush_keys
     
 
 class CachingQuerySet(models.query.QuerySet):
@@ -425,7 +434,7 @@ class CachingMixin:
 
         For the Addon class, with a pk of 2, we get "o:addons.addon:2".
         """
-        key_parts = ('o', cls._meta, pk)
+        key_parts = ('o', cls._meta.db_table, pk)
         return ':'.join(map(encoding.smart_unicode, key_parts))
 
     def model_flush_key(self):
