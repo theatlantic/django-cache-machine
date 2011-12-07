@@ -423,7 +423,7 @@ class CachingMixin:
 
         For the Addon class, with a pk of 2, we get "o:addons.addon:2".
         """
-        key_parts = ('o', cls._meta, pk)
+        key_parts = ('o', cls._meta.db_table, pk)
         return ':'.join(map(encoding.smart_unicode, key_parts))
 
     def model_flush_key(self):
