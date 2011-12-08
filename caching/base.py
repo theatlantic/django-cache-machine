@@ -5,6 +5,7 @@ import logging
 from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.db import models
+from django.db.models.query import EmptyQuerySet, EmptyResultSet
 from django.db.models import signals
 from django.utils import encoding
 
@@ -158,10 +159,7 @@ class CacheMachine(object):
         return make_key('qs:%s' % self.query_string, with_locale=False)
 
     def __iter__(self):
-        try:
-            query_key = self.query_key()
-        except query.EmptyResultSet:
-            raise StopIteration
+        query_key = self.query_key()
 
         # If anything has been passed to the queryset via extra, we can't
         # ensure that the proper fields will be associated, so we don't cache
@@ -174,6 +172,8 @@ class CacheMachine(object):
         if self.cached is not None and not isinstance(self.cached, int):
             if CACHE_DEBUG:
                 log.debug('cache hit: %s' % self.query_string)
+            if isinstance(self.cached, EmptyQuerySet):
+                raise StopIteration
             for obj in self.cached:
                 obj.from_cache = True
                 yield obj
@@ -190,8 +190,7 @@ class CacheMachine(object):
                 to_cache.append(obj)
                 yield obj
         except StopIteration:
-            if to_cache:
-                self.cache_objects(to_cache)
+            self.cache_objects(to_cache)
             raise
 
     def cache_objects(self, objects):
@@ -205,7 +204,12 @@ class CacheMachine(object):
             # through the cache again
             cache.set(query_key, None, timeout=0)
         else:
-            cache.add(query_key, objects, timeout=self.timeout)
+            if len(objects):
+                cache.add(query_key, objects, timeout=self.timeout)
+            else:
+                empty_queryset = EmptyQuerySet(model=self.queryset.model,
+                    query=self.queryset.query, using=self.queryset.db)
+                cache.set(query_key, empty_queryset, timeout=self.timeout)
             model_flush_keys = set([flush_key(k) for k in extra_flush_keys])
             if len(constraints):
                 model_flush_keys.update([flush_key(k[5:]) for k in constraints.keys()])
@@ -372,10 +376,10 @@ class CachingQuerySet(models.query.QuerySet):
         iterator = super(CachingQuerySet, self).iterator
         if self.timeout == NO_CACHE or skip_cache:
             return iterator()
+        # Work-around for Django #12717 (subqueries on multiple databases).
         try:
-            # Work-around for Django #12717.
             query_string = self.query_string()
-        except models.sql.query.EmptyResultSet:
+        except ValueError:
             return iterator()
 
         if self.cache_machine is not None:
