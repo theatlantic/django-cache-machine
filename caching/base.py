@@ -6,8 +6,11 @@ from django.conf import settings
 from django.core.cache import cache, parse_backend_uri
 from django.db import models
 from django.db.models.query import EmptyQuerySet, EmptyResultSet
+from django.db.models.sql.constants import TABLE_NAME
 from django.db.models import signals
 from django.utils import encoding
+
+from django.contrib.contenttypes.models import ContentType
 
 from .settings import CACHE_DEBUG, CACHE_PREFIX
 from .invalidation import invalidator, flush_key, make_key
@@ -231,6 +234,9 @@ class CacheMachine(object):
         return self._compiler
 
     def get_columns_for_order_by(self, opts=None):
+        """
+        Populate self.column_map from data in the query.
+        """
         columns = tuple()
         if opts is None:
             opts = self.query.model._meta
@@ -247,6 +253,11 @@ class CacheMachine(object):
         return columns
 
     def map_column_to_field_name(self, table, col):
+        """
+        Given a database table name and column name, return the name of the
+        django field (since for foreign keys and fields with the `db_column`
+        keyword the column name and field name might not be the same)
+        """
         field = col
         
         if table in self.table_map and table not in self.column_map:
@@ -263,6 +274,10 @@ class CacheMachine(object):
         return self.query.low_mark != 0 or self.query.high_mark is not None
 
     def get_ordering_fields(self):
+        """
+        Return a list of tuples (table_name, field_name) from all order_by()s
+        relevant to cache invalidation.
+        """
         compiler = self.compiler
         
         if self.query.extra_order_by:
@@ -311,16 +326,77 @@ class CacheMachine(object):
                 raise StopCaching
         
         return order_fields
-            
-    def get_constraints(self):
+    
+    def get_table_name_from_alias(self, alias):
         """
-        Get the table/column constraints associated with the queryset's query.
+        Get the table name from its alias string in a Constraint or WhereNode.
+        """
+        try:
+            return self.query.alias_map[alias][TABLE_NAME]
+        except IndexError:
+            return alias
+    
+    def get_flushkey_for_contenttype(self, where_child, where_constraints):
+        """
+        Given a WhereNode child with a constraint on ContentType.id, determine
+        what the referenced model is and, if there is an `object_id` constraint,
+        get the cache key for that model and that id.
         
-        TODO: Look at join information.
+        Raises StopCaching if there is no object_id constraint, or if the
+        content_object model does not extend CacheMachine.
         """
-        constraints = collections.defaultdict(set)
-        extra_flush_keys = set([])
+        constraint, lookup_type, value_annot, params_or_value = where_child
+        if lookup_type == 'exact' and value_annot and isinstance(params_or_value, int):
+            ct = ContentType.objects.get_for_id(params_or_value)
+            if not ct:
+                raise StopCaching
+            
+            content_type = ct.model_class()
+            # If the content_type of the join doesn't have caching implemented
+            # we can't cache this query
+            if not hasattr(content_type, '_cache_key'):
+                raise StopCaching
+            
+            if content_type._meta.db_table not in self.table_map:
+                self.table_map[content_type._meta.db_table] = content_type
+            table_name = self.get_table_name_from_alias(constraint.alias)
+            field_name = self.map_column_to_field_name(table_name, constraint.col)
+            
+            if table_name not in self.table_map:
+                # This would be unexpected, so stop caching
+                raise StopCaching
+            
+            # join_table is the table that the content_object is defined on
+            join_table = self.table_map[table_name]
+            generic_field = None
+            for virtual_field in join_table._meta.virtual_fields:
+                if virtual_field.ct_field == field_name:
+                    generic_field = virtual_field
+                    break
+            if generic_field is None:
+                raise Exception("Content-Type field-model mismatch")
+            # If there is no constraint on object_id, this isn't a traditional ct join
+            if (table_name, generic_field.fk_field) not in where_constraints:
+                raise StopCaching
+            fk_where_children = where_constraints[(table_name, generic_field.fk_field)]
+            for fk_where_child in fk_where_children:
+                constraint, lookup_type, value_annot, params_or_value = fk_where_child
+                if lookup_type == 'exact' and value_annot and isinstance(params_or_value, int):
+                    fk_id = params_or_value
+                    return content_type._cache_key(fk_id)
+            raise StopCaching
+        else:
+            # This is an unusual way of joining against ContentTypes, better
+            # leave it alone
+            raise StopCaching
+    
+    def get_where_children(self):
+        """
+        Iterate through and collect the "children" tuples of the
+        django.db.models.sql.where.WhereNode objects
+        """
         stack = [self.query.where]
+        children = []
         while stack:
             curr_where = stack.pop()
             for k, v in curr_where.__dict__.items():
@@ -330,32 +406,69 @@ class CacheMachine(object):
                             stack.append(item)
                         elif isinstance(item, (tuple)):
                             if len(item) > 0 and isinstance(item[0], models.sql.where.Constraint):
-                                constraint, lookup_type, value_annot, params_or_value = item
-                                model = constraint.field.model
-                                name = constraint.field.name
-                                if not hasattr(model, '_model_key'):
-                                    continue
-                                if model._meta.pk and model._meta.pk.name == name:
-                                    # If the constraint is of the form "id IN (...)"
-                                    # or "id=###" then get the cache key of the object
-                                    # with that id and add it to extra_flush_keys
-                                    if lookup_type == 'exact' and isinstance(params_or_value, int):
-                                        extra_flush_keys.add(model._cache_key(params_or_value))
-                                    elif lookup_type == 'in' and isinstance(params_or_value, list):
-                                        extra_flush_keys.update(map(model._cache_key, params_or_value))
-                                    # Don't add primary keys to the constraints list
-                                    continue
-                                constraint_key = u'cols:%s' % model._model_key()
-                                if model._meta.db_table not in self.table_map:
-                                    self.table_map[model._meta.db_table] = model
-                                constraints[constraint_key].add(name)
+                                children.append(item)
+        return children
+
+    def get_constraints(self):
+        """
+        Get the table/column constraints associated with the queryset's query.
+        """
+        constraints = collections.defaultdict(set)
+        extra_flush_keys = set([])
+        stack = [self.query.where]
+        
+        if self.query.model._meta.db_table not in self.table_map:
+            self.table_map[self.query.model._meta.db_table] = self.query.model
+        
         if self.has_offset_or_limit():
             order_fields = self.get_ordering_fields()
             for table, name in order_fields:
                 constraint_key = u'cols:m:%s' % table
                 constraints[constraint_key].add(name)
+        
+        content_type = None
+        object_id = None
+        
+        children = self.get_where_children()
+        where_constraints = {}
+        for child in children:
+            constraint, lookup_type, value_annot, params_or_value = child
+            table_name = self.get_table_name_from_alias(constraint.alias)
+            field_name = self.map_column_to_field_name(table_name, constraint.col)
+            field_tuple = (table_name, field_name)
+            if field_tuple not in where_constraints:
+                where_constraints[field_tuple] = []
+            where_constraints[field_tuple].append(child)
+        
+        for child in children:
+            constraint, lookup_type, value_annot, params_or_value = child
+            model = constraint.field.model
+            if model._meta.db_table not in self.table_map:
+                self.table_map[model._meta.db_table] = model
+            name = constraint.field.name
+            if model == ContentType and constraint.field.name == 'id':
+                ct_flush_key = self.get_flushkey_for_contenttype(child, where_constraints)
+                if ct_flush_key is not None:
+                    extra_flush_keys.add(ct_flush_key)
+            elif not hasattr(model, '_model_key'):
+                raise StopCaching
+            else:
+                if model._meta.pk and model._meta.pk.name == name:
+                    # If the constraint is of the form "id IN (...)" or "id=###"
+                    # then get the cache key of the object with that id and add
+                    # it to extra_flush_keys
+                    if lookup_type == 'exact' and isinstance(params_or_value, int):
+                        extra_flush_keys.add(model._cache_key(params_or_value))
+                    elif lookup_type == 'in' and isinstance(params_or_value, list):
+                        extra_flush_keys.update(map(model._cache_key, params_or_value))
+                    # Don't add primary keys to the constraints list
+                    continue
+                constraint_key = u'cols:%s' % model._model_key()
+                if model._meta.db_table not in self.table_map:
+                    self.table_map[model._meta.db_table] = model
+                constraints[constraint_key].add(name)
         return constraints, extra_flush_keys
-    
+
 
 class CachingQuerySet(models.query.QuerySet):
     
