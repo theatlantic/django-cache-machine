@@ -244,8 +244,11 @@ class CacheMachine(object):
             self.column_map[opts.db_table] = {}
         only_load = self.compiler.deferred_to_columns()
         for field, model in opts.get_fields_with_model():
-            alias = self.query.included_inherited_models[model]
-            table = self.query.alias_map[alias][models.sql.constants.TABLE_NAME]
+            try:
+                alias = self.query.included_inherited_models[model]
+                table = self.query.alias_map[alias][models.sql.constants.TABLE_NAME]
+            except KeyError:
+                continue
             if table in only_load and field.column not in only_load[table]:
                 continue
             columns += ((table, field.name),)
