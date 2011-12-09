@@ -489,18 +489,23 @@ class CachingQuerySet(models.query.QuerySet):
         return sql % params
 
     def iterator(self, skip_cache=False):
+        if self._result_cache is not None:
+            return iter(self.queryset._result_cache)
         iterator = super(CachingQuerySet, self).iterator
         if self.timeout == NO_CACHE or skip_cache:
-            return iterator()
+            self._iter = iterator()
+            return self._iter
         # Work-around for Django #12717 (subqueries on multiple databases).
         try:
             query_string = self.query_string()
         except ValueError:
-            return iterator()
+            self._iter = iterator()
+            return self._iter
 
         if self.cache_machine is not None:
-            return iter(self.cache_machine)
-
+            self._iter = iter(self.cache_machine)
+            return self._iter
+        
         self.cache_machine = CacheMachine(self)
         query_key = self.cache_machine.query_key()
         try:
@@ -512,10 +517,12 @@ class CachingQuerySet(models.query.QuerySet):
         # We return the regular queryset iterator, which yields an
         # uncached result set.
         if cached is None:
-            return iterator()
+            self._iter = iterator()
+            return self._iter
         else:
             self.cache_machine.cached = cached
-        return iter(self.cache_machine)
+        self._iter = iter(self.cache_machine)
+        return self._iter
 
     def cache(self, timeout=None):
         qs = self._clone()
