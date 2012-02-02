@@ -445,6 +445,7 @@ class CacheMachine(object):
         
         for child in children:
             constraint, lookup_type, value_annot, params_or_value = child
+            if not hasattr(constraint.field, 'model'): continue
             model = constraint.field.model
             if model._meta.db_table not in self.table_map:
                 self.table_map[model._meta.db_table] = model
