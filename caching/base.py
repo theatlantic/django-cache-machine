@@ -72,7 +72,7 @@ class CachingManager(models.Manager):
         # We only need to flush the model if the post already exists; when new
         # instances are created it flushes the model cache, so calling flush
         # here would be redundant
-        if not instance.id:
+        if not instance.pk:
             return
         
         cls = instance.__class__
@@ -80,7 +80,7 @@ class CachingManager(models.Manager):
             return
         
         # Grab the original object, before the to-be-saved changes
-        orig = cls.objects.no_cache().get(pk=instance.id)
+        orig = cls.objects.no_cache().get(pk=instance.pk)
         
         constraint_key = 'cols:%s' % instance.model_key
         flush_cols = invalidator.get_flush_lists([constraint_key])
