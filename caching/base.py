@@ -499,7 +499,7 @@ class CachingQuerySet(models.query.QuerySet):
         # Work-around for Django #12717 (subqueries on multiple databases).
         try:
             query_string = self.query_string()
-        except ValueError:
+        except (ValueError, EmptyResultSet):
             self._iter = iterator()
             return self._iter
 
