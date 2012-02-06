@@ -91,7 +91,7 @@ class CacheClass(BaseCache):
         """
         key = self.make_key(key, version=version)
         value = self._cache.get(key)
-        if not isinstance(value, basestring):
+        if not isinstance(value, basestring) or value == 'None':
             return default
         return self.unpickle(value)
 
