@@ -9,7 +9,6 @@ from django.db.models.query import EmptyQuerySet, EmptyResultSet
 from django.db.models.sql.constants import TABLE_NAME
 from django.db.models import signals
 from django.utils import encoding
-from pickle import UnpicklingError
 
 from django.contrib.contenttypes.models import ContentType
 
@@ -17,6 +16,11 @@ from .settings import CACHE_DEBUG, CACHE_PREFIX
 from .invalidation import invalidator, flush_key, make_key
 
 from datetime import timedelta
+
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
 
 try:
     from redis.exceptions import ConnectionError
@@ -511,7 +515,7 @@ class CachingQuerySet(models.query.QuerySet):
         query_key = self.cache_machine.query_key()
         try:
             cached = cache.get(query_key, default=-1)
-        except (ConnectionError, UnpicklingError,):
+        except (ConnectionError, pickle.UnpicklingError,):
             cached = None
         # If the value is None, that means it has a lock on it after
         # being cleared (if the key doesn't exist, we would get -1).
