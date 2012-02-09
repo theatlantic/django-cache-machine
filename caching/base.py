@@ -18,11 +18,6 @@ from .invalidation import invalidator, flush_key, make_key
 from datetime import timedelta
 
 try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
-
-try:
     from redis.exceptions import ConnectionError
 except ImportError:
     class ConnectionError(Exception):
@@ -516,7 +511,7 @@ class CachingQuerySet(models.query.QuerySet):
         query_key = self.cache_machine.query_key()
         try:
             cached = cache.get(query_key, default=-1)
-        except (ConnectionError, pickle.UnpicklingError,):
+        except (ConnectionError):
             cached = None
         # If the value is None, that means it has a lock on it after
         # being cleared (if the key doesn't exist, we would get -1).

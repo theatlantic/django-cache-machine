@@ -93,8 +93,11 @@ class CacheClass(BaseCache):
         value = self._cache.get(key)
         if not isinstance(value, basestring) or value == 'None':
             return default
-        return self.unpickle(value)
-
+        try:
+            return self.unpickle(value)
+        except UnpicklingError:
+            return None
+            
     def set(self, key, value, timeout=None, version=None):
         """
         Persist a value to the cache, and set an optional expiration time.
