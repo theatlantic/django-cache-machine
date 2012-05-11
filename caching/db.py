@@ -544,6 +544,8 @@ class CachingMixin:
     """Whether to invalidate the model in the post_save. Set in the pre_save"""
     invalidate_model = False
     
+    cache_enabled = True
+
     def flush_key(self):
         return flush_key(self)
 
