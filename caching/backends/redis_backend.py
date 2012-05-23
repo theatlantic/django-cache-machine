@@ -1,3 +1,5 @@
+import zlib
+
 from django.core.cache.backends.base import BaseCache, InvalidCacheBackendError
 from django.utils.encoding import smart_unicode, smart_str
 from django.utils.datastructures import SortedDict
@@ -62,6 +64,8 @@ class CacheClass(BaseCache):
         else:
             port = 6379
         self._cache = redis.Redis(host=host, port=port, db=db, password=password)
+        
+        self._compress = params.get('compress') == 'true'
 
     def make_key(self, key, version=None):
         """
@@ -93,6 +97,14 @@ class CacheClass(BaseCache):
         value = self._cache.get(key)
         if not isinstance(value, basestring):
             return default
+
+        if self._compress:
+            try:
+                value = zlib.decompress(value)
+            except zlib.error:
+                # Not compressed?
+                pass
+
         return self.unpickle(value)
 
     def set(self, key, value, timeout=None, version=None):
@@ -100,10 +112,13 @@ class CacheClass(BaseCache):
         Persist a value to the cache, and set an optional expiration time.
         """
         key = self.make_key(key, version=version)
+
         # store the pickled value
-        result = self._cache.set(key, pickle.dumps(value))
+        result = self._cache.set(key, self.pickle(value))
+
         # set expiration if needed
         self.expire(key, timeout, version=version)
+
         # result is a boolean
         return result
 
@@ -114,7 +129,7 @@ class CacheClass(BaseCache):
         key = self.make_key(key, version=version)
         if timeout is None:
             timeout = self.default_timeout
-        return self._cache.setex(key, pickle.dumps(value), timeout)
+        return self._cache.setex(key, self.pickle(value), timeout)
 
     def expire(self, key, timeout=None, version=None):
         """
@@ -159,8 +174,27 @@ class CacheClass(BaseCache):
         """
         Unpickles the given value.
         """
+        if self._compress:
+            try:
+                value = zlib.decompress(value)
+            except zlib.error:
+                # Not compressed?
+                pass
+
         value = smart_str(value)
         return pickle.loads(value)
+
+    def pickle(self, obj):
+        """
+        Pickles a given object.
+
+        @return: encoded object
+        @rtype:  string
+        """
+        value = pickle.dumps(obj)
+        if self._compress:
+            value = zlib.compress(value, zlib.Z_BEST_SPEED)
+        return value
 
     def get_many(self, keys, version=None):
         """
@@ -189,7 +223,7 @@ class CacheClass(BaseCache):
         """
         safe_data = {}
         for key, value in data.iteritems():
-            safe_data[key] = pickle.dumps(value)
+            safe_data[key] = self.pickle(value)
         if safe_data:
             self._cache.mset(dict((self.make_key(key, version=version), value)
                                    for key, value in safe_data.iteritems()))
@@ -206,7 +240,7 @@ class CacheClass(BaseCache):
                 pipe.multi()
                 for key, value in data.iteritems():
                     key = self.make_key(key, version=version)
-                    self._cache.setex(key, pickle.dumps(value), timeout)
+                    self._cache.setex(key, self.pickle(value), timeout)
                 pipe.execute()
                 break
             except WatchError:
