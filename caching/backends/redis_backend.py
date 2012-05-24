@@ -15,7 +15,6 @@ except ImportError:
     raise InvalidCacheBackendError(
         "Redis cache backend requires the 'redis-py' library")
 
-
 class CacheKey(object):
     """
     A stub string class that we can use to check if a key was created already.
@@ -182,7 +181,10 @@ class CacheClass(BaseCache):
                 pass
 
         value = smart_str(value)
-        return pickle.loads(value)
+        try:
+            return pickle.loads(value)
+        except pickle.UnpicklingError:
+            return None
 
     def pickle(self, obj):
         """
@@ -194,6 +196,7 @@ class CacheClass(BaseCache):
         value = pickle.dumps(obj)
         if self._compress:
             value = zlib.compress(value, zlib.Z_BEST_SPEED)
+
         return value
 
     def get_many(self, keys, version=None):
