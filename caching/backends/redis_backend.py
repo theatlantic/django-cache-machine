@@ -15,6 +15,18 @@ except ImportError:
     raise InvalidCacheBackendError(
         "Redis cache backend requires the 'redis-py' library")
 
+import functools
+def never_throw(f):
+    @functools.wraps(f)
+    def _f(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception, e:
+            import warnings, traceback
+            warnings.warn( traceback.format_exc() )
+            return None
+    return _f
+
 class CacheKey(object):
     """
     A stub string class that we can use to check if a key was created already.
@@ -169,22 +181,15 @@ class CacheClass(BaseCache):
         # TODO : potential data loss here, should we only delete keys based on the correct version ?
         self._cache.flushdb()
 
+    @never_throw
     def unpickle(self, value):
         """
         Unpickles the given value.
         """
         if self._compress:
-            try:
-                value = zlib.decompress(value)
-            except zlib.error:
-                # Not compressed?
-                pass
+            value = zlib.decompress(value)
 
-        value = smart_str(value)
-        try:
-            return pickle.loads(value)
-        except pickle.UnpicklingError:
-            return None
+        return pickle.loads(value)
 
     def pickle(self, obj):
         """
