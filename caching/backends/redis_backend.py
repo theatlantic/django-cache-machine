@@ -109,13 +109,6 @@ class CacheClass(BaseCache):
         if not isinstance(value, basestring):
             return default
 
-        if self._compress:
-            try:
-                value = zlib.decompress(value)
-            except zlib.error:
-                # Not compressed?
-                pass
-
         return self.unpickle(value)
 
     def set(self, key, value, timeout=None, version=None):
