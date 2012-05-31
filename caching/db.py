@@ -445,10 +445,22 @@ class CacheMachine(object):
         
         for child in children:
             constraint, lookup_type, value_annot, params_or_value = child
-            model = constraint.field.model
+
+            model = getattr(constraint.field, 'model', None)
+            name = getattr(constraint.field, 'name', None)
+
+            # isnull lookup doesn't always define Constraint.field
+            if model is None or name is None and lookup_type == 'isnull':
+                if constraint.alias in self.table_map:
+                    name = constraint.col
+                    model = self.table_map[constraint.alias]
+
+            if model is None or name is None:
+                raise StopCaching
+
             if model._meta.db_table not in self.table_map:
                 self.table_map[model._meta.db_table] = model
-            name = constraint.field.name
+
             if model == ContentType and constraint.field.name == 'id':
                 ct_flush_key = self.get_flushkey_for_contenttype(child, where_constraints)
                 if ct_flush_key is not None:
