@@ -209,7 +209,7 @@ class CacheClass(BaseCache):
                     self._cache.setex(key, pickle.dumps(value), timeout)
                 pipe.execute()
                 break
-            except WatchError:
+            except redis.WatchError:
                 continue
             finally:
                 pipe.reset()
