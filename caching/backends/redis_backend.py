@@ -15,6 +15,9 @@ except ImportError:
     raise InvalidCacheBackendError(
         "Redis cache backend requires the 'redis-py' library")
 
+import logging
+logger = logging.getLogger('cache-machine')
+
 import functools
 def never_throw(f):
     @functools.wraps(f)
@@ -22,8 +25,7 @@ def never_throw(f):
         try:
             return f(*args, **kwargs)
         except Exception, e:
-            import warnings, traceback
-            warnings.warn( traceback.format_exc() )
+            logger.warn( traceback.format_exc() )
             return None
     return _f
 
