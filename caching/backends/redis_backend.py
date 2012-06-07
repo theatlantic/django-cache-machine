@@ -25,7 +25,7 @@ def never_throw(f):
         try:
             return f(*args, **kwargs)
         except Exception, e:
-            logger.warn( traceback.format_exc() )
+            logger.exception( "Error in never_throw" )
             return None
     return _f
 
