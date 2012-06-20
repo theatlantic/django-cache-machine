@@ -2,17 +2,16 @@ import collections
 import functools
 import logging
 
-from django.conf import settings
-from django.core.cache import cache, parse_backend_uri
+from django.core.cache import cache
 from django.db import models
-from django.db.models.query import EmptyQuerySet, EmptyResultSet
+from django.db.models.query import EmptyQuerySet
 from django.db.models.sql.constants import TABLE_NAME
 from django.db.models import signals
 from django.utils import encoding
 
 from django.contrib.contenttypes.models import ContentType
 
-from .settings import CACHE_DEBUG, CACHE_PREFIX
+from .settings import CACHE_DEBUG
 from .invalidation import invalidator, flush_key, make_key
 
 from datetime import timedelta
@@ -290,7 +289,6 @@ class CacheMachine(object):
         else:
             ordering = self.query.order_by or self.query.model._meta.ordering
         
-        select_aliases = compiler._select_aliases
         all_columns = self.get_columns_for_order_by()
         
         # used to check whether we've already seen something
@@ -418,7 +416,6 @@ class CacheMachine(object):
         """
         constraints = collections.defaultdict(set)
         extra_flush_keys = set([])
-        stack = [self.query.where]
         
         if self.query.model._meta.db_table not in self.table_map:
             self.table_map[self.query.model._meta.db_table] = self.query.model
@@ -428,9 +425,6 @@ class CacheMachine(object):
             for table, name in order_fields:
                 constraint_key = u'cols:m:%s' % table
                 constraints[constraint_key].add(name)
-        
-        content_type = None
-        object_id = None
         
         children = self.get_where_children()
         where_constraints = {}

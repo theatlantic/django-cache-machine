@@ -4,10 +4,8 @@ import hashlib
 import logging
 import socket
 import sys
-from itertools import chain
 
-from django.conf import settings
-from django.core.cache import cache, parse_backend_uri
+from django.core.cache import cache
 from django.utils import encoding, translation
 import caching.backends.redis_backend
 from .settings import CACHE_PREFIX, NO_INVALIDATION

@@ -246,7 +246,7 @@ class CacheClass(BaseCache):
                     self._cache.setex(key, self.pickle(value), timeout)
                 pipe.execute()
                 break
-            except WatchError:
+            except redis.WatchError:
                 continue
             finally:
                 pipe.reset()
