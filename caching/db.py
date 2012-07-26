@@ -79,7 +79,12 @@ class CachingManager(models.Manager):
             return
         
         # Grab the original object, before the to-be-saved changes
-        orig = cls.objects.no_cache().get(pk=instance.pk)
+        try:
+            orig = cls.objects.no_cache().get(pk=instance.pk)
+        except cls.DoesNotExist:
+            if isinstance(instance._meta.pk, models.OneToOneField):
+                return
+            raise
         
         constraint_key = 'cols:%s' % instance.model_key
         flush_cols = invalidator.get_flush_lists([constraint_key])
