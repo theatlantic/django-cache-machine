@@ -183,7 +183,7 @@ class CacheClass(BaseCache):
         """
         if self._compress:
             value = zlib.decompress(value)
-
+        value = smart_str(value)
         return pickle.loads(value)
 
     def pickle(self, obj):
