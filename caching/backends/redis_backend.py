@@ -1,3 +1,4 @@
+import sys
 import zlib
 
 from django.core.cache.backends.base import BaseCache, InvalidCacheBackendError
@@ -25,7 +26,7 @@ def never_throw(f):
         try:
             return f(*args, **kwargs)
         except Exception, e:
-            logger.exception( "Error in never_throw" )
+            logger.warning("Error in never_throw", exc_info=sys.exc_info())
             return None
     return _f
 
