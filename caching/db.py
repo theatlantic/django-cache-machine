@@ -503,6 +503,12 @@ class CachingQuerySet(models.query.QuerySet):
         if self._result_cache is not None:
             return iter(self.queryset._result_cache)
         iterator = super(CachingQuerySet, self).iterator
+        # self._for_write is set to True if the queryset call is initiated
+        # from within a call to QuerySet.update(), QuerySet.delete(),
+        # QuerySet.create(), or QuerySet.get_or_create(). In any of these
+        # cases it is safer to bypass the cache.
+        if self._for_write:
+            skip_cache = True
         if self.timeout == NO_CACHE or skip_cache:
             self._iter = iterator()
             return self._iter
