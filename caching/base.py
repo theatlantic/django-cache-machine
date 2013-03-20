@@ -1,10 +1,10 @@
 from django.db import models
 
 from .settings import CACHEMACHINE_ENABLED
-from .db import CachingQuerySet
+
 
 if CACHEMACHINE_ENABLED:
-    from .db import CachingManager, CachingMixin
+    from .db import CachingManager, CachingMixin, CachingQuerySet
 else:
     def cached_with(obj, f, f_key, timeout=None):
         return f()
@@ -14,3 +14,8 @@ else:
 
     class CachingManager(models.Manager):
         pass
+
+    class CachingQuerySet(models.query.QuerySet):
+        pass
+
+__all__ = ['CachingManager', 'CachingMixin', 'CachingQuerySet']
