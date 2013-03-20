@@ -13,9 +13,14 @@ else:
         cache_enabled = False
 
     class CachingManager(models.Manager):
-        pass
+
+        def no_cache(self):
+            return self.get_query_set()
 
     class CachingQuerySet(models.query.QuerySet):
-        pass
+
+        def no_cache(self):
+            return self
+
 
 __all__ = ['CachingManager', 'CachingMixin', 'CachingQuerySet']
