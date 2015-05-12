@@ -1,11 +1,14 @@
-from setuptools import setup
-
-import caching
+try:
+    from setuptools import setup, find_packages
+except ImportError:
+    from ez_setup import use_setuptools
+    use_setuptools()
+    from setuptools import setup, find_packages
 
 
 setup(
     name='django-cache-machine',
-    version=caching.__version__,
+    version=__import__('caching').__version__,
     description='Automatic caching and invalidation for Django models '
                 'through the ORM.',
     long_description=open('README.rst').read(),
@@ -13,7 +16,7 @@ setup(
     author_email='jbalogh@mozilla.com',
     url='http://github.com/jbalogh/django-cache-machine',
     license='BSD',
-    packages=['caching', 'caching.backends'],
+    packages=find_packages(),
     include_package_data=True,
     zip_safe=False,
     classifiers=[
