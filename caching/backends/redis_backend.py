@@ -1,6 +1,8 @@
 import sys
 import zlib
 
+from six.moves.urllib.parse import urlparse
+
 from django.core.cache.backends.base import BaseCache, InvalidCacheBackendError
 from django.utils.encoding import smart_unicode, smart_str
 from django.utils.datastructures import SortedDict
@@ -55,30 +57,14 @@ class CacheClass(BaseCache):
         super(CacheClass, self).__init__(params)
         options = params.get('OPTIONS', {})
         password = params.get('password', options.get('PASSWORD', None))
-        db = params.get('db', options.get('DB', 1))
-        try:
-            db = int(db)
-        except (ValueError, TypeError):
-            db = 1
-        if '/' in server:
-            host, db_num = server.split('/')
-            try:
-                db = int(db_num)
-            except (ValueError, TypeError):
-                pass
-        else:
-            host = server or 'localhost'
-        
-        if ':' in host:
-            host, port = host.split(':')
-            try:
-                port = int(port)
-            except (ValueError, TypeError):
-                port = 6379
-        else:
-            port = 6379
+
+        urlparts = urlparse(server)
+        db = urlparts.path.lstrip('/')
+        db = int(db) if db else 1
+        host, _, port = urlparts.netloc.partition(':')
+        port = int(port) if port else 6379
+
         self._cache = redis.Redis(host=host, port=port, db=db, password=password)
-        
         self._compress = params.get('compress') == 'true'
 
     def make_key(self, key, version=None):
